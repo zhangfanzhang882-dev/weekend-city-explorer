@@ -12,6 +12,18 @@ type Screen = 'plan' | 'routes' | 'journey' | 'published';
 
 const PRESET_INTERESTS = ['展览', '市集', '演出', '公园', '历史', '咖啡', '徒步', '书店'];
 
+// 点击输入框即展示的默认城市，避免用户面对空白下拉不知道能填什么
+const HOT_CITIES: ICityOption[] = [
+  { name: '上海', adcode: '310000' },
+  { name: '北京', adcode: '110000' },
+  { name: '杭州', adcode: '330100' },
+  { name: '成都', adcode: '510100' },
+  { name: '广州', adcode: '440100' },
+  { name: '深圳', adcode: '440300' },
+  { name: '南京', adcode: '320100' },
+  { name: '西安', adcode: '610100' },
+];
+
 const formatDate = (date: Date) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -46,11 +58,12 @@ export default function HomePage() {
   const [screen, setScreen] = useState<Screen>('plan');
   const [city, setCity] = useState('上海');
   const [cityInput, setCityInput] = useState('上海');
-  const [cityOptions, setCityOptions] = useState<ICityOption[]>([]);
+  const [cityOptions, setCityOptions] = useState<ICityOption[]>(HOT_CITIES);
   const [cityOpen, setCityOpen] = useState(false);
   const [areas, setAreas] = useState<string[]>([]);
   const [area, setArea] = useState('当前位置附近');
   const [areaQuery, setAreaQuery] = useState('');
+  const [areaExpanded, setAreaExpanded] = useState(false);
   const [startDate, setStartDate] = useState(RANGE.start);
   const [endDate, setEndDate] = useState(RANGE.end);
   const [budget, setBudget] = useState(200);
@@ -68,14 +81,14 @@ export default function HomePage() {
   useEffect(() => {
     const keyword = cityInput.trim();
     const timer = window.setTimeout(() => {
+      // 无关键词或未改动时展示热门城市，让点击即可看到可选项
       if (!keyword || keyword === city) {
-        setCityOptions([]);
-        setCityOpen(false);
+        setCityOptions(HOT_CITIES);
         return;
       }
       void searchCities(keyword).then((list) => {
-        setCityOptions(list);
-        setCityOpen(list.length > 0);
+        setCityOptions(list.length > 0 ? list : HOT_CITIES);
+        setCityOpen(true);
       });
     }, 300);
     return () => window.clearTimeout(timer);
@@ -105,6 +118,7 @@ export default function HomePage() {
     setCityOpen(false);
     setArea('当前位置附近');
     setAreaQuery('');
+    setAreaExpanded(false);
   };
 
   const locate = () => {
@@ -185,9 +199,12 @@ export default function HomePage() {
   }
 
   const days = dayCount(startDate, endDate);
-  const filteredAreas = areaQuery.trim()
+  const matchedAreas = areaQuery.trim()
     ? areas.filter((item) => item.includes(areaQuery.trim()))
-    : areas.slice(0, 8);
+    : areas;
+  // 区域较多时默认折叠，避免表单过长；搜索状态下直接展示全部匹配项
+  const areaCollapsed = !areaQuery.trim() && !areaExpanded && matchedAreas.length > 8;
+  const filteredAreas = areaCollapsed ? matchedAreas.slice(0, 8) : matchedAreas;
 
   return (
     <main className="min-h-screen overflow-hidden">
@@ -219,19 +236,24 @@ export default function HomePage() {
                       placeholder="输入城市名搜索，如 杭州"
                       value={cityInput}
                       onChange={(event) => setCityInput(event.target.value)}
-                      onFocus={() => cityOptions.length > 0 && setCityOpen(true)}
+                      onFocus={() => setCityOpen(true)}
+                      onClick={() => setCityOpen(true)}
                     />
                     <Button variant="outline" onClick={locate}><LocateFixed size={16} />{locating ? '定位中' : '定位'}</Button>
                   </div>
                   {cityOpen && cityOptions.length > 0 && (
                     <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-xl border bg-card shadow-lg">
+                      <div className="border-b bg-muted/50 px-3 py-1.5 text-[11px] font-bold tracking-wide text-muted-foreground">
+                        {cityOptions === HOT_CITIES ? '热门城市' : '搜索结果'}
+                      </div>
                       {cityOptions.map((option) => (
                         <button
                           key={`${option.name}-${option.adcode}`}
-                          className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm hover:bg-muted"
+                          className={`flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm hover:bg-muted ${option.name === city ? 'font-bold text-primary' : ''}`}
                           onClick={() => pickCity(option.name)}
                         >
-                          <MapPin size={14} className="text-muted-foreground" />{option.name}
+                          <MapPin size={14} className={option.name === city ? 'text-primary' : 'text-muted-foreground'} />{option.name}
+                          {option.name === city && <span className="ml-auto text-xs">当前</span>}
                         </button>
                       ))}
                     </div>
@@ -265,6 +287,12 @@ export default function HomePage() {
                         onClick={() => { setArea(areaQuery.trim()); setAreaQuery(''); }}
                         className="rounded-full border border-dashed border-primary px-3 py-1.5 text-sm text-primary"
                       ><Plus size={13} className="mr-1 inline" />用“{areaQuery.trim()}”搜索</button>
+                    )}
+                    {areaCollapsed && (
+                      <button
+                        onClick={() => setAreaExpanded(true)}
+                        className="rounded-full border border-dashed px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted"
+                      >展开全部 {matchedAreas.length} 个</button>
                     )}
                   </div>
                   <p className="mt-2 text-xs text-muted-foreground">已选：{area}</p>
