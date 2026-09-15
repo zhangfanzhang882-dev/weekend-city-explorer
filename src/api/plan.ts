@@ -37,10 +37,13 @@ export interface IPlanResponse {
 
 export interface IPlanInput {
   city: string;
-  area: string;
+  /** 多选区域；空数组表示不限区域 */
+  areas: string[];
   date: string;
   endDate: string;
   budget: number;
+  /** 预算档位名称，如「经济实惠」 */
+  budgetTier: string;
   interests: string[];
   partySize: number;
 }

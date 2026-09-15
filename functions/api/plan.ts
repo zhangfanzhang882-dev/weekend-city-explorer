@@ -7,10 +7,15 @@ interface Env {
 
 interface PlanRequest {
   city: string;
+  /** 兼容单区域旧字段 */
   area: string;
+  /** 多选区域；为空表示不限区域 */
+  areas: string[];
   date: string;
   endDate: string;
   budget: number;
+  /** 预算档位标识，用于向 AI 说明消费取向 */
+  budgetTier: string;
   interests: string[];
   partySize: number;
 }
@@ -224,11 +229,21 @@ async function getPois(request: PlanRequest, key: string) {
   const complementaryKeywords = ['博物馆', '公园', '咖啡', '演出', '艺术中心'];
   const merged = [...new Set([...requestedKeywords, ...complementaryKeywords])];
   const interestKeywords = merged.slice(0, Math.max(5, Math.min(requestedKeywords.length, 6)));
-  // 区域词直接使用用户选择的行政区，让检索真正落在该区域
-  const areaPrefix = request.area === '当前位置附近' ? '' : request.area.replace('路线', '').replace('漫游', '');
-  const queries = interestKeywords.map((interest) => `${areaPrefix}${interest}`);
+  // 区域可多选：对每个区域分别检索，让每个选中区域都有候选地点。
+  // 区域数多时缩减每区关键词数，避免请求量随乘积膨胀。
+  const selectedAreas = request.areas.length > 0 ? request.areas : [''];
+  const perAreaKeywords = selectedAreas.length > 1
+    ? interestKeywords.slice(0, Math.max(2, Math.ceil(6 / selectedAreas.length)))
+    : interestKeywords;
+
+  const queries: string[] = [];
+  for (const areaName of selectedAreas) {
+    const prefix = areaName.replace('路线', '').replace('漫游', '');
+    for (const interest of perAreaKeywords) queries.push(`${prefix}${interest}`);
+  }
+
   const payloads: Array<Record<string, unknown>> = [];
-  for (const keywords of queries) {
+  for (const keywords of queries.slice(0, 10)) {
     payloads.push(await amapGet('/v3/place/text', {
       keywords,
       city: request.city,
@@ -299,7 +314,31 @@ async function getPois(request: PlanRequest, key: string) {
 
   // 当天闭馆的地点直接排除；若剩余不足则退回全量，避免无结果
   const openable = enriched.filter((poi) => poi.openStatus !== 'closed');
-  return (openable.length >= 6 ? openable : enriched).slice(0, 20);
+  const usable = openable.length >= 6 ? openable : enriched;
+
+  // 多选区域时按区域配额取样，避免前几个区把 20 个名额占满、后面的区一个都进不来
+  if (request.areas.length > 1) {
+    const quota = Math.max(2, Math.floor(20 / request.areas.length));
+    const picked: typeof usable = [];
+    const counts = new Map<string, number>();
+    // 先按配额轮取每个选中区域的地点
+    for (const poi of usable) {
+      const matched = request.areas.find((name) => poi.area.includes(name) || name.includes(poi.area));
+      if (!matched) continue;
+      const used = counts.get(matched) ?? 0;
+      if (used >= quota) continue;
+      counts.set(matched, used + 1);
+      picked.push(poi);
+    }
+    // 名额未满则用其余地点补齐
+    for (const poi of usable) {
+      if (picked.length >= 20) break;
+      if (!picked.includes(poi)) picked.push(poi);
+    }
+    if (picked.length >= 6) return picked.slice(0, 20);
+  }
+
+  return usable.slice(0, 20);
 }
 
 function parseJsonObject(raw: string) {
@@ -335,7 +374,7 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
     return { ...rest, ...geo };
   });
 
-  const prompt = `你是周末城市路线规划师。请严格从候选地点中选择，不得创造新地点或修改地点名称。\n\n用户条件：${JSON.stringify(request)}\n天气：${JSON.stringify(weather)}\n候选地点：${JSON.stringify(poisForPrompt)}\n\n生成3条差异明显的一日路线，每条选3个不同地点。\n\n【地理顺路是硬性要求】每个候选地点带 bearing（相对方位）与 kmFromCenter（距中心公里数）。同一条路线内的地点必须彼此靠近、方位一致，相邻两点距离不得超过 ${MAX_LEG_KM} 公里，整条路线跨度不得超过 ${MAX_SPAN_KM} 公里。绝对不要把城市东边和西边的地点放进同一条路线。三条路线之间应通过不同区域或不同主题体现差异。\n\n候选地点还带 openNote 字段（真实营业时间）。请避免把营业时段明显冲突的地点排进同一条路线。\n\n字段要求：\n- accent：该路线的主题标签，4到6个汉字，例如“室内避雨”“城市漫步”，不要填颜色值或色号。\n- weatherFit：用不超过20个汉字说明这条路线为什么适合当天天气，只描述天气与场地的关系，不要复述日期或预报范围。\n\n只返回JSON：{"routes":[{"title":"","subtitle":"","accent":"","weatherFit":"","stopNames":["候选地点原名"]}]}`;
+  const prompt = `你是周末城市路线规划师。请严格从候选地点中选择，不得创造新地点或修改地点名称。\n\n用户条件：${JSON.stringify(request)}\n天气：${JSON.stringify(weather)}\n候选地点：${JSON.stringify(poisForPrompt)}\n\n生成3条差异明显的一日路线，每条选3个不同地点。\n\n【地理顺路是硬性要求】每个候选地点带 bearing（相对方位）与 kmFromCenter（距中心公里数）。同一条路线内的地点必须彼此靠近、方位一致，相邻两点距离不得超过 ${MAX_LEG_KM} 公里，整条路线跨度不得超过 ${MAX_SPAN_KM} 公里。绝对不要把城市东边和西边的地点放进同一条路线。三条路线之间应通过不同区域或不同主题体现差异。\n\n【消费取向】用户选择的预算档位是「${request.budgetTier}」，人均参考 ${request.budget} 元。请在选点与文案上贴合该取向：经济档优先免费或低价场馆，宽松档可纳入需付费的展览或体验。不要编造价格。\n\n候选地点还带 openNote 字段（真实营业时间）。请避免把营业时段明显冲突的地点排进同一条路线。\n\n字段要求：\n- accent：该路线的主题标签，4到6个汉字，例如“室内避雨”“城市漫步”，不要填颜色值或色号。\n- weatherFit：用不超过20个汉字说明这条路线为什么适合当天天气，只描述天气与场地的关系，不要复述日期或预报范围。\n\n只返回JSON：{"routes":[{"title":"","subtitle":"","accent":"","weatherFit":"","stopNames":["候选地点原名"]}]}`;
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -495,12 +534,23 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const startDate = isDate(raw.date) ? String(raw.date) : new Date().toISOString().slice(0, 10);
     // 结束日期必须不早于开始日期，否则回落为单日
     const rawEnd = isDate(raw.endDate) ? String(raw.endDate) : startDate;
+    // 区域支持多选；兼容旧的单 area 字段
+    const rawAreas = Array.isArray(raw.areas)
+      ? raw.areas.map((item) => safeText(item, 20)).filter(Boolean).slice(0, 5)
+      : [];
+    const legacyArea = safeText(raw.area, 30);
+    const areas = rawAreas.length > 0
+      ? rawAreas
+      : (legacyArea && legacyArea !== '当前位置附近' && legacyArea !== '不限区域' ? [legacyArea] : []);
+
     const request: PlanRequest = {
       city: safeText(raw.city, 20) || '上海',
-      area: safeText(raw.area, 30) || '当前位置附近',
+      area: areas.length > 0 ? areas.join('、') : '不限区域',
+      areas,
       date: startDate,
       endDate: rawEnd >= startDate ? rawEnd : startDate,
       budget: Math.min(Math.max(Number(raw.budget) || 200, 0), 5000),
+      budgetTier: safeText(raw.budgetTier, 16) || '适中',
       interests: Array.isArray(raw.interests) ? raw.interests.map((item) => safeText(item, 12)).filter(Boolean).slice(0, 6) : [],
       partySize: Math.min(Math.max(Number(raw.partySize) || 1, 1), 20),
     };

@@ -12,6 +12,14 @@ type Screen = 'plan' | 'routes' | 'journey' | 'published';
 
 const PRESET_INTERESTS = ['展览', '市集', '演出', '公园', '历史', '咖啡', '徒步', '书店'];
 
+/** 预算档位：用档位替代精确数值，降低填写负担；amount 仅作为传给 AI 的参考值 */
+const BUDGET_TIERS = [
+  { key: 'free', label: '穷游党', desc: '尽量免费', amount: 50 },
+  { key: 'thrifty', label: '经济实惠', desc: '100 元上下', amount: 100 },
+  { key: 'comfy', label: '舒适适中', desc: '300 元左右', amount: 300 },
+  { key: 'rich', label: '土豪随意', desc: '不看价格', amount: 1500 },
+] as const;
+
 // 点击输入框即展示的默认城市，避免用户面对空白下拉不知道能填什么
 const HOT_CITIES: ICityOption[] = [
   { name: '上海', adcode: '310000' },
@@ -61,12 +69,12 @@ export default function HomePage() {
   const [cityOptions, setCityOptions] = useState<ICityOption[]>(HOT_CITIES);
   const [cityOpen, setCityOpen] = useState(false);
   const [areas, setAreas] = useState<string[]>([]);
-  const [area, setArea] = useState('当前位置附近');
+  const [selectedAreas, setSelectedAreas] = useState<string[]>([]);
   const [areaQuery, setAreaQuery] = useState('');
   const [areaExpanded, setAreaExpanded] = useState(false);
   const [startDate, setStartDate] = useState(RANGE.start);
   const [endDate, setEndDate] = useState(RANGE.end);
-  const [budget, setBudget] = useState(200);
+  const [budgetTier, setBudgetTier] = useState<typeof BUDGET_TIERS[number]['key']>('comfy');
   const [interests, setInterests] = useState<string[]>(['展览', '市集']);
   const [interestInput, setInterestInput] = useState('');
   const [routes, setRoutes] = useState<IRoute[]>([]);
@@ -127,9 +135,17 @@ export default function HomePage() {
     setCity(name);
     setCityInput(name);
     setCityOpen(false);
-    setArea('当前位置附近');
+    setSelectedAreas([]);
     setAreaQuery('');
     setAreaExpanded(false);
+  };
+
+  /** 区域多选切换 */
+  const toggleArea = (name: string) => {
+    setSelectedAreas((current) => (current.includes(name)
+      ? current.filter((item) => item !== name)
+      : current.length >= 5 ? current : [...current, name]));
+    setAreaQuery('');
   };
 
   const locate = () => {
@@ -170,7 +186,17 @@ export default function HomePage() {
     setGenerating(true);
     setError('');
     try {
-      const result = await createAiPlan({ city, area, date: startDate, endDate, budget, interests, partySize: 2 });
+      const tier = BUDGET_TIERS.find((item) => item.key === budgetTier) ?? BUDGET_TIERS[2];
+      const result = await createAiPlan({
+        city,
+        areas: selectedAreas,
+        date: startDate,
+        endDate,
+        budget: tier.amount,
+        budgetTier: tier.label,
+        interests,
+        partySize: 2,
+      });
       setPlanResult(result);
       setRoutes(result.routes);
       setScreen('routes');
@@ -315,45 +341,62 @@ export default function HomePage() {
                       <div className="border-b bg-muted/50 px-3 py-1.5 text-[11px] font-bold tracking-wide text-muted-foreground">
                         {cityOptions === HOT_CITIES ? '热门城市' : '搜索结果'}
                       </div>
-                      {cityOptions.map((option) => (
-                        <button
-                          key={`${option.name}-${option.adcode}`}
-                          className={`flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm hover:bg-muted ${option.name === city ? 'font-bold text-primary' : ''}`}
-                          onClick={() => pickCity(option.name)}
-                        >
-                          <MapPin size={14} className={option.name === city ? 'text-primary' : 'text-muted-foreground'} />{option.name}
-                          {option.name === city && <span className="ml-auto text-xs">当前</span>}
-                        </button>
-                      ))}
+                      {/* 限高并允许滚动，城市较多时不会撑破弹层 */}
+                      <div className="max-h-56 overflow-y-auto overscroll-contain">
+                        {cityOptions.map((option) => (
+                          <button
+                            key={`${option.name}-${option.adcode}`}
+                            className={`flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm hover:bg-muted ${option.name === city ? 'font-bold text-primary' : ''}`}
+                            onClick={() => pickCity(option.name)}
+                          >
+                            <MapPin size={14} className={option.name === city ? 'text-primary' : 'text-muted-foreground'} />{option.name}
+                            {option.name === city && <span className="ml-auto text-xs">当前</span>}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
                   <p className="mt-2 text-xs text-muted-foreground">已选：{city} · 输入关键词可搜索其他城市</p>
                 </div>
 
                 <div>
-                  <label className="mb-2 block text-sm font-bold" htmlFor="area-input">想去哪里玩</label>
+                  <label className="mb-2 block text-sm font-bold" htmlFor="area-input">想去哪里玩<span className="ml-1 font-normal text-muted-foreground">可多选</span></label>
                   <Input
                     id="area-input"
                     aria-label="搜索区域"
-                    placeholder={areas.length ? '搜索或从下方推荐中选择' : '正在加载区域推荐…'}
+                    placeholder={areas.length ? '搜索区域，或从下方点选（可多选）' : '正在加载区域推荐…'}
                     value={areaQuery}
                     onChange={(event) => setAreaQuery(event.target.value)}
                   />
+
+                  {/* 已选区域独立成行，便于确认与移除 */}
+                  {selectedAreas.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {selectedAreas.map((item) => (
+                        <span key={item} className="inline-flex items-center gap-1 rounded-full bg-primary px-3 py-1.5 text-sm text-primary-foreground">
+                          {item}
+                          <button aria-label={`移除 ${item}`} onClick={() => toggleArea(item)} className="ml-0.5 rounded-full p-0.5 hover:bg-primary-foreground/20"><X size={12} /></button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
                   <div className="mt-2 flex flex-wrap gap-2">
                     <button
-                      onClick={() => { setArea('当前位置附近'); setAreaQuery(''); }}
-                      className={`rounded-full border px-3 py-1.5 text-sm transition ${area === '当前位置附近' ? 'border-primary bg-primary text-primary-foreground' : 'bg-card hover:bg-muted'}`}
-                    >不限区域</button>
-                    {filteredAreas.map((item) => (
+                      onClick={() => { setSelectedAreas([]); setAreaQuery(''); }}
+                      aria-pressed={selectedAreas.length === 0}
+                      className={`rounded-full border px-3 py-1.5 text-sm transition ${selectedAreas.length === 0 ? 'border-primary bg-primary text-primary-foreground font-semibold' : 'bg-card text-muted-foreground hover:bg-muted'}`}
+                    >{selectedAreas.length === 0 ? '不限区域' : '清空，改为不限'}</button>
+                    {filteredAreas.filter((item) => !selectedAreas.includes(item)).map((item) => (
                       <button
                         key={item}
-                        onClick={() => { setArea(item); setAreaQuery(''); }}
-                        className={`rounded-full border px-3 py-1.5 text-sm transition ${area === item ? 'border-primary bg-primary text-primary-foreground' : 'bg-card hover:bg-muted'}`}
-                      >{item}</button>
+                        onClick={() => toggleArea(item)}
+                        className="rounded-full border bg-card px-3 py-1.5 text-sm transition hover:bg-muted"
+                      >+ {item}</button>
                     ))}
                     {areaQuery.trim() && filteredAreas.length === 0 && (
                       <button
-                        onClick={() => { setArea(areaQuery.trim()); setAreaQuery(''); }}
+                        onClick={() => toggleArea(areaQuery.trim())}
                         className="rounded-full border border-dashed border-primary px-3 py-1.5 text-sm text-primary"
                       ><Plus size={13} className="mr-1 inline" />用“{areaQuery.trim()}”搜索</button>
                     )}
@@ -364,7 +407,11 @@ export default function HomePage() {
                       >展开全部 {matchedAreas.length} 个</button>
                     )}
                   </div>
-                  <p className="mt-2 text-xs text-muted-foreground">已选：{area}</p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {selectedAreas.length === 0
+                      ? '未限定区域，将在全城范围内找地点'
+                      : `已选 ${selectedAreas.length}/5 个区域，每个区域都会检索候选地点`}
+                  </p>
                 </div>
 
                 <div>
@@ -422,7 +469,23 @@ export default function HomePage() {
                   <p className="mt-2 text-xs text-muted-foreground">已选 {interests.length}/6 个，回车即可添加自定义关键词</p>
                 </div>
 
-                <div><label className="mb-2 block text-sm font-bold" htmlFor="budget-input">人均预算</label><div className="flex items-center gap-3"><Input id="budget-input" aria-label="人均预算" type="number" min="0" max="5000" value={budget} onChange={(event) => setBudget(Number(event.target.value))} /><span className="shrink-0 text-sm font-semibold">元 / 人</span></div></div>
+                <div>
+                  <span className="mb-2 block text-sm font-bold">预算档位</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    {BUDGET_TIERS.map((tier) => (
+                      <button
+                        key={tier.key}
+                        onClick={() => setBudgetTier(tier.key)}
+                        aria-pressed={budgetTier === tier.key}
+                        className={`rounded-xl border px-3 py-2.5 text-left transition ${budgetTier === tier.key ? 'border-primary bg-primary text-primary-foreground' : 'bg-card hover:bg-muted'}`}
+                      >
+                        <span className="block text-sm font-bold">{tier.label}</span>
+                        <span className={`block text-xs ${budgetTier === tier.key ? 'text-primary-foreground/80' : 'text-muted-foreground'}`}>{tier.desc}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">高德多数场馆无票价数据，档位主要用于筛选与文案取向</p>
+                </div>
 
                 {error && <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{error}</div>}
                 <Button size="lg" className="w-full rounded-xl" disabled={generating || interests.length === 0} onClick={() => void generatePlan()}><Search size={18} />{generating ? '正在查天气、地点并生成路线…' : '生成我的路线'}</Button>
@@ -440,7 +503,7 @@ export default function HomePage() {
             <div>
               <div className="text-xs font-bold uppercase tracking-[0.18em] text-primary">数据来源：{planResult.sources.join(' · ')}</div>
               <h2 className="mt-2 text-4xl font-black tracking-tight">为你排好了 {routes.length} 条路线</h2>
-              <p className="mt-2 text-muted-foreground">{city} · {area} · {startDate}{endDate !== startDate ? ` 至 ${endDate}` : ''} · 参考天气 {planResult.weather.date} {planResult.weather.condition} · {planResult.weather.tempLow}–{planResult.weather.tempHigh}℃</p>
+              <p className="mt-2 text-muted-foreground">{city} · {selectedAreas.length > 0 ? selectedAreas.join('、') : '不限区域'} · {startDate}{endDate !== startDate ? ` 至 ${endDate}` : ''} · 参考天气 {planResult.weather.date} {planResult.weather.condition} · {planResult.weather.tempLow}–{planResult.weather.tempHigh}℃</p>
               {planResult.weather.forecastStatus === 'out_of_range'
                 ? <p className="mt-2 max-w-2xl rounded-xl bg-warning/10 px-3 py-2 text-sm text-warning">{planResult.weather.note}</p>
                 : planResult.weather.rangeSummary && <p className="mt-2 max-w-2xl rounded-xl bg-secondary px-3 py-2 text-sm text-muted-foreground">{planResult.weather.note}</p>}
