@@ -1,4 +1,4 @@
-import type { IRoute } from '@/data/trips';
+import type { IRoute, IStop } from '@/data/trips';
 
 export interface IWeatherResult {
   date: string;
@@ -20,6 +20,8 @@ export interface IPlanResponse {
   weather: IWeatherResult;
   routes: IRoute[];
   poiCount: number;
+  /** 全部真实候选地点，供行程编辑时替换或追加 */
+  candidates: IStop[];
   sources: string[];
 }
 

@@ -1,4 +1,4 @@
-// EXPORTS: IStop{id,name,type,area,duration,cost,hasCostData?,source,reason}, IRoute{id,title,subtitle,totalTime,budget,budgetKnownCount?,budgetTotalCount?,weatherFit,accent,stops}, ROUTES
+// EXPORTS: IStop, ICheckIn, IRoute, ROUTES
 export interface IStop {
   id: string;
   name: string;
@@ -8,8 +8,22 @@ export interface IStop {
   cost: number;
   /** 该地点是否有真实价格数据；缺失时前端显示“暂无价格”而非 ¥0 */
   hasCostData?: boolean;
+  /** 高德返回的真实实景照片（已统一为 https） */
+  photos?: string[];
+  rating?: number | null;
+  address?: string;
   source: string[];
   reason: string;
+}
+
+/** 一条打卡记录，形态参考点评：评分 + 文字 + 时间 */
+export interface ICheckIn {
+  id: string;
+  stopId: string;
+  rating: number;
+  text: string;
+  createdAt: string;
+  author: string;
 }
 
 export interface IRoute {

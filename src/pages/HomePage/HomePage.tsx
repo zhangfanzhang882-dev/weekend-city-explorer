@@ -187,7 +187,14 @@ export default function HomePage() {
   };
 
   if (screen === 'journey' && selectedRoute) {
-    return <JourneyPanel route={selectedRoute} onBack={() => setScreen('routes')} onPublished={() => setScreen('published')} />;
+    return (
+      <JourneyPanel
+        route={selectedRoute}
+        candidates={planResult?.candidates ?? []}
+        onBack={() => setScreen('routes')}
+        onPublished={() => setScreen('published')}
+      />
+    );
   }
 
   if (screen === 'published') {
