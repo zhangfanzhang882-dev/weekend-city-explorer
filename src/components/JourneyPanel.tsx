@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Check, CircleDollarSign, MapPin, Plus, RotateCcw, Share2, SkipForward, Users } from 'lucide-react';
+import { Check, CircleDollarSign, Plus, RotateCcw, Share2, SkipForward, Users } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
