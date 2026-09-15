@@ -12,6 +12,14 @@ export interface IStop {
   photos?: string[];
   rating?: number | null;
   address?: string;
+  tel?: string;
+  /** 营业时间交叉校验结果：open=当天开放，closed=当天闭馆，unknown=无数据 */
+  openStatus?: 'open' | 'closed' | 'unknown';
+  openNote?: string;
+  /** 与上一站的直线距离（公里）；首站为 null */
+  legKm?: number | null;
+  /** 高德坐标 "lng,lat"，用于地图标注 */
+  location?: string;
   source: string[];
   reason: string;
 }
@@ -37,6 +45,9 @@ export interface IRoute {
   budgetTotalCount?: number;
   weatherFit: string;
   accent: string;
+  /** 路线总直线里程与最长单段（公里），用于展示"顺路程度" */
+  totalKm?: number;
+  maxLegKm?: number;
   stops: IStop[];
 }
 

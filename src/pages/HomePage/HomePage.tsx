@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { CalendarDays, CheckCircle2, CloudSun, LocateFixed, MapPin, Plus, Search, Sparkles, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { CalendarDays, CloudSun, LocateFixed, MapPin, Plus, Search, Sparkles, Wand2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -75,6 +75,8 @@ export default function HomePage() {
   const [locating, setLocating] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
+  const [sortBy, setSortBy] = useState<'recommend' | 'distance' | 'rating' | 'cheap'>('recommend');
+  const [onlyOpen, setOnlyOpen] = useState(false);
   const cityBoxRef = useRef<HTMLDivElement>(null);
 
   // 城市关键词搜索：防抖 300ms，避免逐字符打接口
@@ -186,31 +188,82 @@ export default function HomePage() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  /** 自定义方案：以评分最高的点为起点，配其最近的邻居，兼顾质量与顺路 */
+  const startCustomRoute = () => {
+    const pool = planResult?.candidates ?? [];
+    if (pool.length < 2) {
+      setError('候选地点不足，无法自定义方案');
+      return;
+    }
+    const point = (location?: string) => {
+      const [lng, lat] = (location || '').split(',').map(Number);
+      return Number.isFinite(lng) && Number.isFinite(lat) ? { lng, lat } : null;
+    };
+    const km = (a: { lng: number; lat: number }, b: { lng: number; lat: number }) => {
+      const toRad = (value: number) => (value * Math.PI) / 180;
+      const dLat = toRad(b.lat - a.lat);
+      const dLng = toRad(b.lng - a.lng);
+      const h = Math.sin(dLat / 2) ** 2
+        + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+      return 6371 * 2 * Math.asin(Math.sqrt(h));
+    };
+
+    // 以评分最高者为种子，再取距它最近的两个点，避免起手就是一条横跨全城的路线
+    const ranked = [...pool].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
+    const seed = ranked[0];
+    const seedPoint = point(seed.location);
+    const rest = ranked.filter((item) => item.name !== seed.name);
+    const neighbors = seedPoint
+      ? rest
+        .map((item) => ({ item, p: point(item.location) }))
+        .filter((entry) => entry.p)
+        .sort((a, b) => km(seedPoint, a.p!) - km(seedPoint, b.p!))
+        .slice(0, 2)
+        .map((entry) => entry.item)
+      : rest.slice(0, 2);
+
+    const seeds = [seed, ...neighbors].map((stop, index) => ({ ...stop, id: `custom-${index}-${stop.name}` }));
+    chooseRoute({
+      id: 'custom',
+      title: '我自己拼的路线',
+      subtitle: '从真实候选地点里自由组合',
+      accent: '自定义',
+      weatherFit: '',
+      totalTime: `${seeds.length * 2} 小时`,
+      budget: seeds.reduce((sum, stop) => sum + stop.cost, 0),
+      budgetKnownCount: seeds.filter((stop) => stop.cost > 0).length,
+      budgetTotalCount: seeds.length,
+      stops: seeds,
+    });
+  };
+
+  /** 方案排序与筛选 */
+  const sortedRoutes = useMemo(() => {
+    const avgRating = (route: IRoute) => {
+      const rated = route.stops.filter((stop) => stop.rating);
+      return rated.length === 0 ? 0 : rated.reduce((sum, stop) => sum + (stop.rating ?? 0), 0) / rated.length;
+    };
+    let list = [...routes];
+    if (onlyOpen) {
+      // 只保留全部站点当天都不闭馆的方案
+      list = list.filter((route) => route.stops.every((stop) => stop.openStatus !== 'closed'));
+    }
+    if (sortBy === 'distance') list.sort((a, b) => (a.totalKm ?? Infinity) - (b.totalKm ?? Infinity));
+    if (sortBy === 'rating') list.sort((a, b) => avgRating(b) - avgRating(a));
+    if (sortBy === 'cheap') list.sort((a, b) => a.budget - b.budget);
+    return list;
+  }, [routes, sortBy, onlyOpen]);
+
   if (screen === 'journey' && selectedRoute) {
     return (
       <JourneyPanel
         route={selectedRoute}
         candidates={planResult?.candidates ?? []}
+        city={city}
+        date={startDate}
+        endDate={endDate}
         onBack={() => setScreen('routes')}
-        onPublished={() => setScreen('published')}
       />
-    );
-  }
-
-  if (screen === 'published') {
-    return (
-      <main className="mx-auto flex min-h-screen max-w-xl flex-col items-center justify-center px-5 text-center">
-        <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-primary text-primary-foreground"><CheckCircle2 size={38} /></div>
-        <Badge variant="secondary">路线发布成功</Badge>
-        <h1 className="mt-4 text-4xl font-black tracking-tight">这次出行，真的走过了</h1>
-        <p className="mt-3 max-w-md text-muted-foreground">已根据你的打卡、跳过和临时地点生成实际路线。计划没有完成也没关系，真实经历才是攻略。</p>
-        <div className="mt-7 w-full rounded-3xl border bg-card p-5 text-left shadow-sm">
-          <div className="text-xs font-bold uppercase tracking-widest text-primary">我的路线攻略</div>
-          <div className="mt-2 text-xl font-black">{selectedRoute?.title || '城市漫游实录'}</div>
-          <p className="mt-2 text-sm text-muted-foreground">来自实际打卡记录 · 可继续编辑后分享</p>
-        </div>
-        <div className="mt-6 flex gap-3"><Button variant="outline" onClick={() => setScreen('journey')}>继续编辑</Button><Button onClick={() => setScreen('plan')}>再规划一次</Button></div>
-      </main>
     );
   }
 
@@ -394,7 +447,49 @@ export default function HomePage() {
             </div>
             <Badge variant="secondary" className="w-fit">{planResult.poiCount} 个真实地点候选</Badge>
           </div>
-          <div className="grid gap-5 lg:grid-cols-3">{routes.map((route, index) => <RouteCard key={route.id} route={route} featured={index === 0} onChoose={chooseRoute} />)}</div>
+          {planResult.verified && (
+            <div className="mb-6 flex flex-wrap gap-x-5 gap-y-2 rounded-2xl border bg-card px-4 py-3 text-xs text-muted-foreground">
+              <span className="font-bold text-foreground">数据核验</span>
+              <span>营业时间已确认 {planResult.verified.openConfirmed}/{planResult.verified.total}</span>
+              <span>含实景照片 {planResult.verified.withPhotos}/{planResult.verified.total}</span>
+              <span>含评分 {planResult.verified.withRating}/{planResult.verified.total}</span>
+              {planResult.verified.openUnknown > 0 && <span className="text-warning">{planResult.verified.openUnknown} 个地点营业时间无数据，出发前请自行确认</span>}
+            </div>
+          )}
+          {/* 排序与自定义：默认方案之外给用户主动权 */}
+          <div className="mb-6 flex flex-wrap items-center gap-2">
+            <span className="text-sm font-bold">排序</span>
+            {([
+              { key: 'recommend', label: '推荐顺序' },
+              { key: 'distance', label: '路程最短' },
+              { key: 'rating', label: '评分最高' },
+              { key: 'cheap', label: '花费最少' },
+            ] as const).map((option) => (
+              <button
+                key={option.key}
+                onClick={() => setSortBy(option.key)}
+                className={`rounded-full border px-3 py-1.5 text-sm transition ${sortBy === option.key ? 'border-primary bg-primary text-primary-foreground font-semibold' : 'bg-card hover:bg-muted'}`}
+              >{option.label}</button>
+            ))}
+            <button
+              onClick={() => setOnlyOpen((value) => !value)}
+              className={`ml-1 rounded-full border px-3 py-1.5 text-sm transition ${onlyOpen ? 'border-primary bg-primary text-primary-foreground font-semibold' : 'bg-card hover:bg-muted'}`}
+            >仅看当天营业</button>
+            <Button variant="outline" className="ml-auto" onClick={startCustomRoute}>
+              <Wand2 size={15} />自己拼一条
+            </Button>
+          </div>
+
+          <div className="grid gap-5 lg:grid-cols-3">
+            {sortedRoutes.map((route, index) => (
+              <RouteCard key={route.id} route={route} featured={index === 0 && sortBy === 'recommend'} onChoose={chooseRoute} />
+            ))}
+          </div>
+          {sortedRoutes.length === 0 && (
+            <div className="rounded-3xl border border-dashed p-8 text-center text-sm text-muted-foreground">
+              没有符合当前筛选条件的方案，可放宽筛选或点「自己拼一条」。
+            </div>
+          )}
         </section>
       )}
     </main>

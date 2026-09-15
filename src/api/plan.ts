@@ -16,12 +16,22 @@ export interface IWeatherResult {
   source: string;
 }
 
+/** 数据核验汇总，用于向用户说明这批地点的可信度 */
+export interface IVerifiedSummary {
+  total: number;
+  openConfirmed: number;
+  openUnknown: number;
+  withPhotos: number;
+  withRating: number;
+}
+
 export interface IPlanResponse {
   weather: IWeatherResult;
   routes: IRoute[];
   poiCount: number;
   /** 全部真实候选地点，供行程编辑时替换或追加 */
   candidates: IStop[];
+  verified: IVerifiedSummary;
   sources: string[];
 }
 

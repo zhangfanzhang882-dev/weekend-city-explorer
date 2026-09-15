@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { ArrowRight, Clock3, MapPin, Sparkles, Users } from 'lucide-react';
+import { ArrowRight, Clock3, ImageOff, MapPin, Route, Star, Users } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import type { IRoute } from '@/data/trips';
+import type { IRoute, IStop } from '@/data/trips';
 
 interface RouteCardProps {
   route: IRoute;
@@ -10,26 +10,98 @@ interface RouteCardProps {
   onChoose: (route: IRoute) => void;
 }
 
-/** 路线封面：取首个有实景照片的站点，失败则降级为渐变底 */
+/**
+ * 封面图。
+ * 高德实景照片竖横混杂（375x500、712x931、500x375）。此前用 3.4:1 横条承载，
+ * 竖图需放大 1.4 倍再截掉约 2/3 高度，既模糊又看不到主体。
+ * 现改为 4:3 画幅；同时优先选用接近该画幅的照片，把裁切量降到最低。
+ */
 function RouteCover({ route }: { route: IRoute }) {
-  const [failed, setFailed] = useState(false);
-  const cover = route.stops.find((stop) => stop.photos?.length)?.photos?.[0];
-  if (!cover || failed) {
+  const [failedSrc, setFailedSrc] = useState<string[]>([]);
+  const [ratios, setRatios] = useState<Record<string, number>>({});
+  const TARGET = 4 / 3;
+
+  const available = route.stops
+    .flatMap((stop) => stop.photos ?? [])
+    .filter((url) => !failedSrc.includes(url));
+
+  // 已知宽高比的照片里挑最接近 4:3 的；未测得尺寸前用第一张，避免首屏空白
+  const measured = available.filter((url) => ratios[url]);
+  const cover = measured.length > 0
+    ? measured.reduce((best, url) =>
+      Math.abs(ratios[url] - TARGET) < Math.abs(ratios[best] - TARGET) ? url : best)
+    : available[0];
+
+  if (!cover) {
     return (
-      <div className="mb-4 flex h-40 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-secondary">
-        <Sparkles size={30} className="text-accent-foreground/60" />
+      <div className="flex aspect-[4/3] w-full items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-secondary">
+        <span className="flex flex-col items-center gap-1 text-accent-foreground/60">
+          <ImageOff size={26} />
+          <span className="text-xs">暂无实景图</span>
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl bg-muted">
+      {/* 预加载其余照片以测得宽高比，用于挑选最合适的封面 */}
+      <div className="hidden">
+        {available.filter((url) => url !== cover && !ratios[url]).map((url) => (
+          <img
+            key={url}
+            src={url}
+            alt=""
+            onLoad={(event) => {
+              const img = event.currentTarget;
+              if (img.naturalHeight > 0) {
+                setRatios((prev) => ({ ...prev, [url]: img.naturalWidth / img.naturalHeight }));
+              }
+            }}
+            onError={() => setFailedSrc((prev) => [...prev, url])}
+          />
+        ))}
+      </div>
+      <img
+        src={cover}
+        alt={`${route.title}实景`}
+        loading="lazy"
+        onLoad={(event) => {
+          const img = event.currentTarget;
+          if (img.naturalHeight > 0 && !ratios[cover]) {
+            setRatios((prev) => ({ ...prev, [cover]: img.naturalWidth / img.naturalHeight }));
+          }
+        }}
+        onError={() => setFailedSrc((prev) => [...prev, cover])}
+        className="h-full w-full object-cover transition duration-500 group-hover:scale-105"
+      />
+    </div>
+  );
+}
+
+/** 站点缩略图：正方形小图，竖图裁切量可接受；无图时用序号占位 */
+function StopThumb({ stop, index }: { stop: IStop; index: number }) {
+  const [failed, setFailed] = useState(false);
+  const photo = stop.photos?.[0];
+  if (!photo || failed) {
+    return (
+      <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-secondary text-sm font-bold text-secondary-foreground">
+        {index + 1}
       </div>
     );
   }
   return (
-    <div className="mb-4 h-40 overflow-hidden rounded-2xl">
+    <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-xl bg-muted">
       <img
-        src={cover}
-        alt={route.title}
+        src={photo}
+        alt={stop.name}
         loading="lazy"
         onError={() => setFailed(true)}
-        className="h-full w-full object-cover transition duration-500 group-hover:scale-105"
+        className="h-full w-full object-cover"
       />
+      <span className="absolute left-0 top-0 flex h-5 w-5 items-center justify-center rounded-br-lg bg-foreground/75 text-[10px] font-bold text-background">
+        {index + 1}
+      </span>
     </div>
   );
 }
@@ -45,32 +117,74 @@ export default function RouteCard({ route, featured, onChoose }: RouteCardProps)
     && route.budgetKnownCount < route.budgetTotalCount;
 
   return (
-    <article className={`group relative overflow-hidden rounded-[28px] border bg-card p-5 shadow-sm transition duration-300 hover:-translate-y-1 hover:shadow-lg ${featured ? 'border-primary/45' : ''}`}>
-      {featured && <div className="absolute right-4 top-4 z-10 rounded-full bg-primary px-3 py-1 text-xs font-semibold text-primary-foreground">最适合你</div>}
-      <RouteCover route={route} />
-      {route.accent && <Badge variant="secondary" className="mb-3">{route.accent}</Badge>}
-      <h3 className="text-2xl font-black tracking-tight">{route.title}</h3>
-      <p className="mt-1 text-sm text-muted-foreground">{route.subtitle}</p>
-      <div className="mt-5 flex flex-wrap gap-3 text-sm">
-        <span className="flex items-center gap-1.5"><Clock3 size={15} />{route.totalTime}</span>
-        <span className="flex items-center gap-1.5"><Users size={15} />2–4 人</span>
-        {hasAnyCost
-          ? <span className="font-semibold text-primary">{costPartial ? `已知 ¥${route.budget}/人起` : `约 ¥${route.budget}/人`}</span>
-          : <span className="text-muted-foreground">门票价格暂无数据</span>}
-      </div>
-      <div className="my-5 space-y-0">
-        {route.stops.map((stop, index) => (
-          <div className="relative flex gap-3 pb-4 last:pb-0" key={stop.id}>
-            {index < route.stops.length - 1 && <div className="absolute left-[11px] top-6 h-full w-px bg-border" />}
-            <div className="relative z-10 mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-secondary text-[11px] font-bold text-secondary-foreground">{index + 1}</div>
-            <div>
-              <div className="font-semibold">{stop.name}</div>
-              <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground"><MapPin size={12} />{stop.area}<span>·</span>{stop.duration}</div>
-            </div>
+    <article className={`group relative flex flex-col overflow-hidden rounded-[28px] border bg-card shadow-sm transition duration-300 hover:-translate-y-1 hover:shadow-lg ${featured ? 'border-primary/45' : ''}`}>
+      <div className="relative p-3 pb-0">
+        <RouteCover route={route} />
+        {featured && (
+          <div className="absolute right-5 top-5 z-10 rounded-full bg-primary px-3 py-1 text-xs font-semibold text-primary-foreground shadow-sm">
+            最适合你
           </div>
-        ))}
+        )}
       </div>
-      <Button className="w-full rounded-xl" onClick={() => onChoose(route)}>预览这条路线 <ArrowRight size={16} /></Button>
+
+      <div className="flex flex-1 flex-col p-5 pt-4">
+        {route.accent && <Badge variant="secondary" className="mb-2 w-fit">{route.accent}</Badge>}
+        <h3 className="text-2xl font-black leading-tight tracking-tight">{route.title}</h3>
+        <p className="mt-1.5 text-sm leading-6 text-muted-foreground">{route.subtitle}</p>
+
+        {route.weatherFit && (
+          <p className="mt-3 rounded-xl bg-secondary px-3 py-2 text-xs leading-5 text-muted-foreground">
+            {route.weatherFit}
+          </p>
+        )}
+
+        <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-sm">
+          <span className="flex items-center gap-1.5"><Clock3 size={15} />{route.totalTime}</span>
+          <span className="flex items-center gap-1.5"><Users size={15} />2–4 人</span>
+          {route.totalKm !== undefined && route.totalKm > 0 && (
+            <span className="flex items-center gap-1.5" title="站点间直线距离总和">
+              <Route size={15} />全程约 {route.totalKm} km
+            </span>
+          )}
+          {hasAnyCost
+            ? <span className="font-semibold text-primary">{costPartial ? `已知 ¥${route.budget}/人起` : `约 ¥${route.budget}/人`}</span>
+            : <span className="text-muted-foreground">门票价格暂无数据</span>}
+        </div>
+
+        <div className="mt-4 space-y-2.5">
+          {route.stops.map((stop, index) => (
+            <div key={stop.id}>
+              {index > 0 && stop.legKm !== null && stop.legKm !== undefined && (
+                <div className="ml-7 flex items-center gap-1.5 py-1 text-[11px] text-muted-foreground">
+                  <span className="h-3 w-px bg-border" />
+                  <span>约 {stop.legKm} km</span>
+                </div>
+              )}
+              <div className="flex items-center gap-3">
+                <StopThumb stop={stop} index={index} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-semibold" title={stop.name}>{stop.name}</div>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                    <span className="flex items-center gap-1"><MapPin size={11} />{stop.area}</span>
+                    <span>·</span>
+                    <span>{stop.duration}</span>
+                    {stop.rating ? (
+                      <>
+                        <span>·</span>
+                        <span className="flex items-center gap-0.5"><Star size={11} className="fill-warning text-warning" />{stop.rating}</span>
+                      </>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <Button className="mt-5 w-full rounded-xl" onClick={() => onChoose(route)}>
+          预览这条路线 <ArrowRight size={16} />
+        </Button>
+      </div>
     </article>
   );
 }

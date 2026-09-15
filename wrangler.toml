@@ -1,3 +1,10 @@
 name = "weekend-city-explorer"
 compatibility_date = "2026-09-11"
 pages_build_output_dir = "./dist"
+
+# 行程与打卡数据存储。
+# 本地开发由 miniflare 自动模拟，无需真实命名空间；
+# 线上需在 Cloudflare 控制台 Settings → Bindings 添加同名 KV 绑定 TRIPS。
+[[kv_namespaces]]
+binding = "TRIPS"
+id = "placeholder_replace_in_dashboard"

@@ -24,8 +24,126 @@ interface AmapPoi {
   cityname?: string;
   adname?: string;
   location?: string;
+  tel?: string | string[];
   photos?: Array<{ title?: string | string[]; url?: string }>;
-  biz_ext?: { rating?: string; cost?: string };
+  biz_ext?: { rating?: string; cost?: string; opentime2?: string | string[] };
+}
+
+const WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
+/**
+ * 交叉校验营业时间。
+ * 高德 opentime2 覆盖率约 19/20，包含"周二全天不开放"这类关键信息。
+ * 例如上海自然博物馆周二闭馆，不校验就会把它排进周二行程，用户白跑一趟。
+ */
+function checkOpening(opentime: string | string[] | undefined, date: string) {
+  const text = Array.isArray(opentime) ? opentime.join('') : (opentime || '');
+  if (!text) return { status: 'unknown' as const, note: '营业时间暂无数据' };
+
+  const parsed = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return { status: 'unknown' as const, note: '营业时间暂无数据' };
+  const weekday = WEEKDAY_NAMES[parsed.getDay()];
+  const order = ['一', '二', '三', '四', '五', '六', '日'];
+  const currentIndex = order.indexOf(weekday.replace('周', ''));
+
+  for (const segment of text.split(/[；;]/).map((item) => item.trim()).filter(Boolean)) {
+    if (!/不开放|休馆|闭馆|停止营业/.test(segment)) continue;
+    let covers = segment.includes(weekday);
+    if (!covers) {
+      const range = segment.match(/周([一二三四五六日])\s*[-–至]\s*周([一二三四五六日])/);
+      if (range) {
+        const from = order.indexOf(range[1]);
+        const to = order.indexOf(range[2]);
+        covers = from >= 0 && to >= 0 && currentIndex >= from && currentIndex <= to;
+      }
+    }
+    if (covers) return { status: 'closed' as const, note: `${weekday}不开放` };
+  }
+  return { status: 'open' as const, note: text.slice(0, 60) };
+}
+
+/** 解析高德 "lng,lat" 字符串 */
+function parseLocation(location: string) {
+  const [lng, lat] = location.split(',').map(Number);
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+  return { lng, lat };
+}
+
+/**
+ * 两点直线距离（公里，Haversine）。
+ * 实测直线与高德真实路径比值约 1.17–1.43，足以判断"一个在东一个在西"，
+ * 且无需额外接口调用。
+ */
+function haversineKm(a: { lng: number; lat: number }, b: { lng: number; lat: number }) {
+  const toRad = (value: number) => (value * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 6371 * 2 * Math.asin(Math.sqrt(h));
+}
+
+/** 路线地理指标：相邻站点间距、总里程、最远两点跨度 */
+function routeGeometry(stops: Array<{ location: string }>) {
+  const points = stops.map((stop) => parseLocation(stop.location)).filter(Boolean) as Array<{ lng: number; lat: number }>;
+  if (points.length < 2) return { legs: [] as number[], totalKm: 0, maxLegKm: 0, spanKm: 0, measured: false };
+  const legs: number[] = [];
+  for (let i = 1; i < points.length; i += 1) legs.push(haversineKm(points[i - 1], points[i]));
+  let spanKm = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    for (let j = i + 1; j < points.length; j += 1) spanKm = Math.max(spanKm, haversineKm(points[i], points[j]));
+  }
+  return {
+    legs,
+    totalKm: legs.reduce((sum, value) => sum + value, 0),
+    maxLegKm: Math.max(...legs),
+    spanKm,
+    measured: points.length === stops.length,
+  };
+}
+
+/** 单段可接受上限（公里），超过视为不顺路 */
+const MAX_LEG_KM = 6;
+/** 一日路线总跨度上限（公里） */
+const MAX_SPAN_KM = 12;
+
+/**
+ * 按最近邻重排站点，消除折返。
+ * AI 给的顺序常是随意的（西→东→西），重排后总里程显著下降。
+ * 枚举每个起点取总里程最短者；3 个点规模极小，开销可忽略。
+ */
+function orderByProximity<T extends { location: string }>(stops: T[]): T[] {
+  const points = stops.map((stop) => parseLocation(stop.location));
+  if (points.some((point) => !point)) return stops;
+  const coords = points as Array<{ lng: number; lat: number }>;
+  let best = stops;
+  let bestTotal = Infinity;
+  for (let start = 0; start < stops.length; start += 1) {
+    const remaining = stops.map((_, index) => index).filter((index) => index !== start);
+    const order = [start];
+    let total = 0;
+    let current = start;
+    while (remaining.length > 0) {
+      let nearest = 0;
+      let nearestKm = Infinity;
+      remaining.forEach((index, position) => {
+        const km = haversineKm(coords[current], coords[index]);
+        if (km < nearestKm) {
+          nearestKm = km;
+          nearest = position;
+        }
+      });
+      total += nearestKm;
+      current = remaining[nearest];
+      order.push(current);
+      remaining.splice(nearest, 1);
+    }
+    if (total < bestTotal) {
+      bestTotal = total;
+      best = order.map((index) => stops[index]);
+    }
+  }
+  return best;
 }
 
 interface RouteDraft {
@@ -155,21 +273,33 @@ async function getPois(request: PlanRequest, key: string) {
   if (pois.length < 6) throw new Error('真实地点候选不足，请更换城市、区域或兴趣后重试');
   // 高德照片部分返回 http，页面为 https 会被浏览器拦截，统一升级协议
   const toHttps = (url?: string) => (url || '').replace(/^http:\/\//, 'https://');
-  return pois.slice(0, 20).map((poi, index) => ({
-    id: poi.id || `poi-${index + 1}`,
-    name: poi.name,
-    type: poi.type?.split(';').at(-1) || '城市体验',
-    area: poi.adname || request.area,
-    address: Array.isArray(poi.address) ? poi.address.join('') : poi.address || '',
-    location: poi.location || '',
-    rating: Number(poi.biz_ext?.rating || 0) || null,
-    cost: Math.max(0, Math.round(Number(poi.biz_ext?.cost || 0) || 0)),
-    photos: (poi.photos ?? [])
-      .map((photo) => toHttps(photo.url))
-      .filter((url) => url.startsWith('https://'))
-      .slice(0, 3),
-    source: ['高德地图'],
-  }));
+  const flatten = (value?: string | string[]) => (Array.isArray(value) ? value.join('') : value || '');
+
+  const enriched = pois.map((poi, index) => {
+    const opening = checkOpening(poi.biz_ext?.opentime2, request.date);
+    return {
+      id: poi.id || `poi-${index + 1}`,
+      name: poi.name,
+      type: poi.type?.split(';').at(-1) || '城市体验',
+      area: poi.adname || request.area,
+      address: flatten(poi.address),
+      location: poi.location || '',
+      tel: flatten(poi.tel).split(';')[0] || '',
+      rating: Number(poi.biz_ext?.rating || 0) || null,
+      cost: Math.max(0, Math.round(Number(poi.biz_ext?.cost || 0) || 0)),
+      openStatus: opening.status,
+      openNote: opening.note,
+      photos: (poi.photos ?? [])
+        .map((photo) => toHttps(photo.url))
+        .filter((url) => url.startsWith('https://'))
+        .slice(0, 3),
+      source: ['高德地图'],
+    };
+  });
+
+  // 当天闭馆的地点直接排除；若剩余不足则退回全量，避免无结果
+  const openable = enriched.filter((poi) => poi.openStatus !== 'closed');
+  return (openable.length >= 6 ? openable : enriched).slice(0, 20);
 }
 
 function parseJsonObject(raw: string) {
@@ -182,9 +312,30 @@ function parseJsonObject(raw: string) {
 
 async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awaited<ReturnType<typeof getPois>>, env: Env) {
   const baseUrl = (env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '');
-  // 照片 URL 对选点决策无用且很占 token，送给模型前剔除
-  const poisForPrompt = pois.map(({ photos, ...rest }) => rest);
-  const prompt = `你是周末城市路线规划师。请严格从候选地点中选择，不得创造新地点或修改地点名称。\n\n用户条件：${JSON.stringify(request)}\n天气：${JSON.stringify(weather)}\n候选地点：${JSON.stringify(poisForPrompt)}\n\n生成3条差异明显的一日路线，每条选3个不同地点，并考虑天气、区域顺路、预算和兴趣。\n\n字段要求：\n- accent：该路线的主题标签，4到6个汉字，例如“室内避雨”“城市漫步”，不要填颜色值或色号。\n- weatherFit：用不超过20个汉字说明这条路线为什么适合当天天气，只描述天气与场地的关系，不要复述日期或预报范围。\n\n只返回JSON：{"routes":[{"title":"","subtitle":"","accent":"","weatherFit":"","stopNames":["候选地点原名"]}]}`;
+
+  // 候选点几何中心，用于给模型提供可读的相对方位
+  const center = (() => {
+    const points = pois.map((poi) => parseLocation(poi.location)).filter(Boolean) as Array<{ lng: number; lat: number }>;
+    if (points.length === 0) return null;
+    return {
+      lng: points.reduce((sum, p) => sum + p.lng, 0) / points.length,
+      lat: points.reduce((sum, p) => sum + p.lat, 0) / points.length,
+    };
+  })();
+
+  // 照片 URL 与原始坐标对选点决策无用且占 token，换成方位与距中心距离
+  const poisForPrompt = pois.map(({ photos, location, ...rest }) => {
+    const point = parseLocation(location);
+    const geo = point && center
+      ? {
+        bearing: `${point.lat >= center.lat ? '北' : '南'}${point.lng >= center.lng ? '东' : '西'}`,
+        kmFromCenter: Number(haversineKm(center, point).toFixed(1)),
+      }
+      : {};
+    return { ...rest, ...geo };
+  });
+
+  const prompt = `你是周末城市路线规划师。请严格从候选地点中选择，不得创造新地点或修改地点名称。\n\n用户条件：${JSON.stringify(request)}\n天气：${JSON.stringify(weather)}\n候选地点：${JSON.stringify(poisForPrompt)}\n\n生成3条差异明显的一日路线，每条选3个不同地点。\n\n【地理顺路是硬性要求】每个候选地点带 bearing（相对方位）与 kmFromCenter（距中心公里数）。同一条路线内的地点必须彼此靠近、方位一致，相邻两点距离不得超过 ${MAX_LEG_KM} 公里，整条路线跨度不得超过 ${MAX_SPAN_KM} 公里。绝对不要把城市东边和西边的地点放进同一条路线。三条路线之间应通过不同区域或不同主题体现差异。\n\n候选地点还带 openNote 字段（真实营业时间）。请避免把营业时段明显冲突的地点排进同一条路线。\n\n字段要求：\n- accent：该路线的主题标签，4到6个汉字，例如“室内避雨”“城市漫步”，不要填颜色值或色号。\n- weatherFit：用不超过20个汉字说明这条路线为什么适合当天天气，只描述天气与场地的关系，不要复述日期或预报范围。\n\n只返回JSON：{"routes":[{"title":"","subtitle":"","accent":"","weatherFit":"","stopNames":["候选地点原名"]}]}`;
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -215,8 +366,14 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
     return /尚未进入预报窗口|预报范围|\d{4}-\d{2}/.test(text) ? '' : text;
   };
   const valid = drafts.slice(0, 3).map((draft, routeIndex) => {
-    const selected = (draft.stopNames || []).map((name) => poiMap.get(name)).filter(Boolean).slice(0, 3) as typeof pois;
-    if (selected.length < 3) return null;
+    const picked = (draft.stopNames || []).map((name) => poiMap.get(name)).filter(Boolean).slice(0, 3) as typeof pois;
+    if (picked.length < 3) return null;
+
+    // 地理硬校验：AI 可能无视提示词，这里按最近邻重排并拒绝跨城组合
+    const selected = orderByProximity(picked);
+    const geometry = routeGeometry(selected);
+    if (geometry.measured && (geometry.maxLegKm > MAX_LEG_KM || geometry.spanKm > MAX_SPAN_KM)) return null;
+
     const knownCosts = selected.filter((poi) => poi.cost > 0);
     return {
       id: `ai-${routeIndex + 1}`,
@@ -229,6 +386,8 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
       // 高德多数 POI 无价格数据，需区分“真的免费”与“暂无数据”，避免误导为全程 0 元。
       budgetKnownCount: knownCosts.length,
       budgetTotalCount: selected.length,
+      totalKm: Number(geometry.totalKm.toFixed(1)),
+      maxLegKm: Number(geometry.maxLegKm.toFixed(1)),
       stops: selected.map((poi, stopIndex) => ({
         id: `${routeIndex + 1}-${poi.id || stopIndex}`,
         name: poi.name,
@@ -240,13 +399,90 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
         photos: poi.photos,
         rating: poi.rating,
         address: poi.address,
+        tel: poi.tel,
+        openStatus: poi.openStatus,
+        openNote: poi.openNote,
+        location: poi.location,
+        legKm: stopIndex === 0 ? null : Number((geometry.legs[stopIndex - 1] ?? 0).toFixed(1)),
         source: poi.source,
         reason: `${poi.address || poi.area}${poi.rating ? ` · 高德评分 ${poi.rating}` : ''}`,
       })),
     };
   }).filter(Boolean);
-  if (valid.length < 2) throw new Error('AI 路线未通过真实地点校验，请重试');
+
+  // AI 三条路线可能全被地理校验拒绝，用确定性聚类兜底，保证始终有顺路方案
+  if (valid.length < 2) {
+    const fallback = buildGeoRoutes(pois);
+    if (fallback.length >= 2) return fallback;
+    throw new Error('未能生成地理上顺路的路线，请缩小区域范围后重试');
+  }
   return valid;
+}
+
+/**
+ * 确定性兜底：按地理邻近聚类生成路线，不依赖 AI。
+ * 取未使用的首个点为种子，配其最近的 2 个邻居成组，天然顺路。
+ */
+function buildGeoRoutes(pois: Awaited<ReturnType<typeof getPois>>) {
+  const withPoint = pois
+    .map((poi) => ({ poi, point: parseLocation(poi.location) }))
+    .filter((item) => item.point) as Array<{ poi: typeof pois[number]; point: { lng: number; lat: number } }>;
+  if (withPoint.length < 6) return [];
+
+  const used = new Set<string>();
+  const routes: Array<Record<string, unknown>> = [];
+
+  for (let index = 0; index < 3; index += 1) {
+    const available = withPoint.filter((item) => !used.has(item.poi.name));
+    if (available.length < 3) break;
+    const seed = available[0];
+    const neighbors = available
+      .filter((item) => item.poi.name !== seed.poi.name)
+      .map((item) => ({ item, km: haversineKm(seed.point, item.point) }))
+      .sort((a, b) => a.km - b.km)
+      .slice(0, 2)
+      .map((entry) => entry.item);
+    if (neighbors.length < 2) break;
+
+    const group = [seed, ...neighbors];
+    group.forEach((item) => used.add(item.poi.name));
+    const selected = orderByProximity(group.map((item) => item.poi));
+    const geometry = routeGeometry(selected);
+    const knownCosts = selected.filter((poi) => poi.cost > 0);
+    routes.push({
+      id: `geo-${index + 1}`,
+      title: `${selected[0].area}就近路线`,
+      subtitle: selected.map((poi) => poi.name).join(' · ').slice(0, 44),
+      accent: '就近顺路',
+      weatherFit: '',
+      totalTime: `${selected.length * 2} 小时`,
+      budget: selected.reduce((sum, poi) => sum + poi.cost, 0),
+      budgetKnownCount: knownCosts.length,
+      budgetTotalCount: selected.length,
+      totalKm: Number(geometry.totalKm.toFixed(1)),
+      maxLegKm: Number(geometry.maxLegKm.toFixed(1)),
+      stops: selected.map((poi, stopIndex) => ({
+        id: `geo${index + 1}-${poi.id || stopIndex}`,
+        name: poi.name,
+        type: poi.type,
+        area: poi.area,
+        duration: '约 2 小时',
+        cost: poi.cost,
+        hasCostData: poi.cost > 0,
+        photos: poi.photos,
+        rating: poi.rating,
+        address: poi.address,
+        tel: poi.tel,
+        openStatus: poi.openStatus,
+        openNote: poi.openNote,
+        location: poi.location,
+        legKm: stopIndex === 0 ? null : Number((geometry.legs[stopIndex - 1] ?? 0).toFixed(1)),
+        source: poi.source,
+        reason: `${poi.address || poi.area}${poi.rating ? ` · 高德评分 ${poi.rating}` : ''}`,
+      })),
+    });
+  }
+  return routes;
 }
 
 export async function onRequestPost(context: { request: Request; env: Env }) {
@@ -285,10 +521,21 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       photos: poi.photos,
       rating: poi.rating,
       address: poi.address,
+      tel: poi.tel,
+      openStatus: poi.openStatus,
+      openNote: poi.openNote,
+      location: poi.location,
       source: poi.source,
       reason: `${poi.address || poi.area}${poi.rating ? ` · 高德评分 ${poi.rating}` : ''}`,
     }));
-    return json({ weather, routes, poiCount: pois.length, candidates, sources: ['高德地图', '高德天气', 'DeepSeek'] });
+    const verified = {
+      total: pois.length,
+      openConfirmed: pois.filter((poi) => poi.openStatus === 'open').length,
+      openUnknown: pois.filter((poi) => poi.openStatus === 'unknown').length,
+      withPhotos: pois.filter((poi) => poi.photos.length > 0).length,
+      withRating: pois.filter((poi) => poi.rating).length,
+    };
+    return json({ weather, routes, poiCount: pois.length, candidates, verified, sources: ['高德地图', '高德天气', 'DeepSeek'] });
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : '路线生成失败' }, 502);
   }
