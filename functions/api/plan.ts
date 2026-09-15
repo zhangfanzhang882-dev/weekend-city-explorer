@@ -9,6 +9,7 @@ interface PlanRequest {
   city: string;
   area: string;
   date: string;
+  endDate: string;
   budget: number;
   interests: string[];
   partySize: number;
@@ -62,14 +63,23 @@ async function getCityAdcode(city: string, key: string) {
   return adcode;
 }
 
-async function getWeather(city: string, date: string, key: string) {
+/**
+ * 天气查询支持日期范围：命中范围内任一天即视为精确，
+ * 并汇总范围内的天气概览，便于跨天行程判断。
+ */
+async function getWeather(city: string, date: string, endDate: string, key: string) {
   const adcode = await getCityAdcode(city, key);
   const data = await amapGet('/v3/weather/weatherInfo', { city: adcode, extensions: 'all' }, key);
   const forecasts = data.forecasts as Array<{ casts?: Array<Record<string, string>> }> | undefined;
   const casts = forecasts?.[0]?.casts ?? [];
-  const selected = casts.find((item) => item.date === date) ?? casts.at(-1);
+  const inRange = casts.filter((item) => item.date >= date && item.date <= endDate);
+  const selected = inRange[0] ?? casts.find((item) => item.date === date) ?? casts.at(-1);
   if (!selected) throw new Error(`暂未获得“${city}”的天气预报`);
-  const forecastStatus = selected.date === date ? 'exact' : 'out_of_range';
+  const forecastStatus = inRange.length > 0 ? 'exact' : 'out_of_range';
+  const rangeDays = date === endDate ? 1 : inRange.length;
+  const rangeSummary = inRange.length > 1
+    ? inRange.map((item) => `${item.date.slice(5)} ${item.dayweather}`).join(' / ')
+    : '';
   return {
     date: selected.date,
     condition: selected.dayweather,
@@ -78,9 +88,12 @@ async function getWeather(city: string, date: string, key: string) {
     dayWind: selected.daywind,
     dayPower: selected.daypower,
     requestedDate: date,
+    requestedEndDate: endDate,
+    coveredDays: rangeDays,
+    rangeSummary,
     forecastStatus,
     note: forecastStatus === 'exact'
-      ? `${date} 的高德预报`
+      ? (rangeSummary ? `所选日期范围的高德预报：${rangeSummary}` : `${selected.date} 的高德预报`)
       : `${date} 尚未进入预报窗口，当前展示最远可用日期 ${selected.date}，路线按临近天气规划`,
     source: '高德天气',
   };
@@ -88,8 +101,11 @@ async function getWeather(city: string, date: string, key: string) {
 
 async function getPois(request: PlanRequest, key: string) {
   const requestedKeywords = request.interests.length ? request.interests : ['展览', '市集'];
+  // 用户自定义关键词优先，只在数量不足时用通用词补齐，避免自定义兴趣被通用词挤掉
   const complementaryKeywords = ['博物馆', '公园', '咖啡', '演出', '艺术中心'];
-  const interestKeywords = [...new Set([...requestedKeywords, ...complementaryKeywords])].slice(0, 5);
+  const merged = [...new Set([...requestedKeywords, ...complementaryKeywords])];
+  const interestKeywords = merged.slice(0, Math.max(5, Math.min(requestedKeywords.length, 6)));
+  // 区域词直接使用用户选择的行政区，让检索真正落在该区域
   const areaPrefix = request.area === '当前位置附近' ? '' : request.area.replace('路线', '').replace('漫游', '');
   const queries = interestKeywords.map((interest) => `${areaPrefix}${interest}`);
   const payloads: Array<Record<string, unknown>> = [];
@@ -227,16 +243,21 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       return json({ error: '服务端尚未配置高德或 AI 密钥' }, 503);
     }
     const raw = await context.request.json() as Partial<PlanRequest>;
+    const isDate = (value: unknown) => /^\d{4}-\d{2}-\d{2}$/.test(String(value));
+    const startDate = isDate(raw.date) ? String(raw.date) : new Date().toISOString().slice(0, 10);
+    // 结束日期必须不早于开始日期，否则回落为单日
+    const rawEnd = isDate(raw.endDate) ? String(raw.endDate) : startDate;
     const request: PlanRequest = {
       city: safeText(raw.city, 20) || '上海',
       area: safeText(raw.area, 30) || '当前位置附近',
-      date: /^\d{4}-\d{2}-\d{2}$/.test(String(raw.date)) ? String(raw.date) : new Date().toISOString().slice(0, 10),
+      date: startDate,
+      endDate: rawEnd >= startDate ? rawEnd : startDate,
       budget: Math.min(Math.max(Number(raw.budget) || 200, 0), 5000),
       interests: Array.isArray(raw.interests) ? raw.interests.map((item) => safeText(item, 12)).filter(Boolean).slice(0, 6) : [],
       partySize: Math.min(Math.max(Number(raw.partySize) || 1, 1), 20),
     };
     const [weather, pois] = await Promise.all([
-      getWeather(request.city, request.date, context.env.AMAP_WEB_SERVICE_KEY),
+      getWeather(request.city, request.date, request.endDate, context.env.AMAP_WEB_SERVICE_KEY),
       getPois(request, context.env.AMAP_WEB_SERVICE_KEY),
     ]);
     const routes = await generateRoutes(request, weather, pois, context.env);
