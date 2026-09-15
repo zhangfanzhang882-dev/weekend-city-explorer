@@ -31,7 +31,7 @@ src/
 ├── hooks/               # 自定义 Hooks
 └── lib/                 # 工具函数（cn() 等）
 
-public/                  # 静态资源（dev server 原样服务；构建后随 dist/output 同源部署）
+public/                  # 静态资源（dev server 原样服务；构建后随 dist 部署）
 ```
 
 ---
@@ -103,3 +103,29 @@ import { useIsMobile } from "@/hooks/use-mobile";
 | 图表色 | `bg-chart-1` ~ `bg-chart-5` | `--chart-1` ~ `--chart-5` |
 
 HSL 格式使用**空格分隔**：`--primary: hsl(150 60% 40%);`
+
+---
+
+## 本地开发与长期部署
+
+项目已连接个人 GitHub 与 Cloudflare Pages：
+
+- GitHub：`zhangfanzhang882-dev/weekend-city-explorer`
+- 生产分支：`main`
+- 构建命令：`npm run build`
+- 输出目录：`dist`
+- 固定公网地址：`https://weekend-city-explorer.pages.dev`
+
+本地更新流程：
+
+```bash
+npm install
+npm run dev
+npm run lint
+npm run build
+git add .
+git commit -m "describe your change"
+git push origin main
+```
+
+推送到 `main` 后，Cloudflare Pages 会自动构建并更新同一个 `pages.dev` 地址。
