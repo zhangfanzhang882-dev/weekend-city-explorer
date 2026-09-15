@@ -103,13 +103,22 @@ export default function HomePage() {
     return () => { alive = false; };
   }, [city]);
 
-  // 点击外部关闭城市下拉
+  // 点击外部关闭城市下拉。
+  // 注意：document 上的 mousedown 会先于 input 的 onClick 触发，若无条件关闭，
+  // 会与 onClick 的展开在同一次点击中相互抵消，导致点击输入框无法弹出下拉。
+  // 因此这里显式区分：点在输入框或下拉内保持展开，点"定位"按钮及其他区域才关闭。
   useEffect(() => {
-    const onClick = (event: MouseEvent) => {
-      if (cityBoxRef.current && !cityBoxRef.current.contains(event.target as Node)) setCityOpen(false);
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('[data-city-picker]')) {
+        setCityOpen(true);
+        return;
+      }
+      setCityOpen(false);
     };
-    document.addEventListener('mousedown', onClick);
-    return () => document.removeEventListener('mousedown', onClick);
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
   }, []);
 
   const pickCity = (name: string) => {
@@ -232,17 +241,17 @@ export default function HomePage() {
                   <div className="grid grid-cols-[1fr_auto] gap-2">
                     <Input
                       id="city-input"
+                      data-city-picker
                       aria-label="搜索城市"
                       placeholder="输入城市名搜索，如 杭州"
                       value={cityInput}
                       onChange={(event) => setCityInput(event.target.value)}
                       onFocus={() => setCityOpen(true)}
-                      onClick={() => setCityOpen(true)}
                     />
                     <Button variant="outline" onClick={locate}><LocateFixed size={16} />{locating ? '定位中' : '定位'}</Button>
                   </div>
                   {cityOpen && cityOptions.length > 0 && (
-                    <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-xl border bg-card shadow-lg">
+                    <div data-city-picker className="absolute z-20 mt-1 w-full overflow-hidden rounded-xl border bg-card shadow-lg">
                       <div className="border-b bg-muted/50 px-3 py-1.5 text-[11px] font-bold tracking-wide text-muted-foreground">
                         {cityOptions === HOT_CITIES ? '热门城市' : '搜索结果'}
                       </div>
