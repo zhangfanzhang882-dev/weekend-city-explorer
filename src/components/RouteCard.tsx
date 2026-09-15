@@ -117,7 +117,7 @@ export default function RouteCard({ route, featured, onChoose }: RouteCardProps)
     && route.budgetKnownCount < route.budgetTotalCount;
 
   return (
-    <article className={`group relative flex flex-col overflow-hidden rounded-[28px] border bg-card shadow-sm transition duration-300 hover:-translate-y-1 hover:shadow-lg ${featured ? 'border-primary/45' : ''}`}>
+    <article className="group relative flex h-full flex-col overflow-hidden rounded-[28px] border bg-card shadow-sm transition duration-300 hover:-translate-y-1 hover:shadow-lg">
       <div className="relative p-3 pb-0">
         <RouteCover route={route} />
         {featured && (
@@ -128,17 +128,19 @@ export default function RouteCard({ route, featured, onChoose }: RouteCardProps)
       </div>
 
       <div className="flex flex-1 flex-col p-5 pt-4">
-        {route.accent && <Badge variant="secondary" className="mb-2 w-fit">{route.accent}</Badge>}
-        <h3 className="text-2xl font-black leading-tight tracking-tight">{route.title}</h3>
-        <p className="mt-1.5 text-sm leading-6 text-muted-foreground">{route.subtitle}</p>
+        {/* 标签行固定高度，避免有无 accent 造成三卡错位 */}
+        <div className="mb-2 h-[22px]">
+          {route.accent && <Badge variant="secondary" className="w-fit">{route.accent}</Badge>}
+        </div>
+        {/* 标题与副标题限定行数，保证三张卡对应区块高度一致 */}
+        <h3 className="line-clamp-1 text-2xl font-black leading-tight tracking-tight">{route.title}</h3>
+        <p className="mt-1.5 line-clamp-2 min-h-[48px] text-sm leading-6 text-muted-foreground">{route.subtitle}</p>
 
-        {route.weatherFit && (
-          <p className="mt-3 rounded-xl bg-secondary px-3 py-2 text-xs leading-5 text-muted-foreground">
-            {route.weatherFit}
-          </p>
-        )}
+        <p className="mt-3 line-clamp-2 min-h-[44px] rounded-xl bg-secondary px-3 py-2 text-xs leading-5 text-muted-foreground">
+          {route.weatherFit || '未提供天气适配说明'}
+        </p>
 
-        <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-sm">
+        <div className="mt-4 flex min-h-[52px] flex-wrap gap-x-4 gap-y-2 text-sm">
           <span className="flex items-center gap-1.5"><Clock3 size={15} />{route.totalTime}</span>
           <span className="flex items-center gap-1.5"><Users size={15} />2–4 人</span>
           {route.totalKm !== undefined && route.totalKm > 0 && (
@@ -151,7 +153,8 @@ export default function RouteCard({ route, featured, onChoose }: RouteCardProps)
             : <span className="text-muted-foreground">门票价格暂无数据</span>}
         </div>
 
-        <div className="mt-4 space-y-2.5">
+        {/* flex-1 撑开剩余空间，把按钮压到卡片底部，三张卡按钮同一水平线 */}
+        <div className="mt-4 flex-1 space-y-2.5">
           {route.stops.map((stop, index) => (
             <div key={stop.id}>
               {index > 0 && stop.legKm !== null && stop.legKm !== undefined && (

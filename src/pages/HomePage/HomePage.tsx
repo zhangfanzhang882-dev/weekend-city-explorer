@@ -543,7 +543,7 @@ export default function HomePage() {
             </Button>
           </div>
 
-          <div className="grid gap-5 lg:grid-cols-3">
+          <div className="grid items-stretch gap-5 lg:grid-cols-3">
             {sortedRoutes.map((route, index) => (
               <RouteCard key={route.id} route={route} featured={index === 0 && sortBy === 'recommend'} onChoose={chooseRoute} />
             ))}

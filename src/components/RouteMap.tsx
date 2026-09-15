@@ -13,17 +13,22 @@ interface Placed {
   index: number;
   x: number;
   y: number;
-  /** 标签是否改放到标记上方，用于避免近距离站点标签重叠 */
-  labelAbove: boolean;
+  /** 标签锚点：引出线终点 */
+  labelX: number;
+  labelY: number;
+  /** 标签在点的左侧还是右侧，决定文字对齐方向 */
+  side: 'left' | 'right';
 }
 
 /**
- * 路线示意图。
+ * 路线位置示意图。
  *
  * 用站点真实经纬度做等距投影后绘制，不依赖地图 SDK：
  * 高德 JS 地图需要另一个「Web端(JS API)」Key 并强制配置安全密钥，
- * 与当前使用的「Web 服务」Key 不通用，因此这里先用零依赖方案表达空间关系。
- * 标注为“示意图”，不声称是精确地图，也不含底图与行政边界。
+ * 与当前使用的「Web 服务」Key 不通用，因此这里用零依赖方案表达空间关系。
+ *
+ * 标签采用「点 + 引出折线」：地点之间可能只隔 0.1 km，名称直接贴在点旁会互相压盖，
+ * 因此把标签统一拉到画布左右两侧，用折线连回各自的点。
  */
 export default function RouteMap({ stops, activeId, className }: RouteMapProps) {
   const layout = useMemo(() => {
@@ -46,37 +51,54 @@ export default function RouteMap({ stops, activeId, className }: RouteMapProps) 
 
     // 纬度方向按 cos(lat) 校正经度跨度，避免高纬度被横向拉伸
     const midLat = (minLat + maxLat) / 2;
-    const lngSpan = Math.max((maxLng - minLng) * Math.cos((midLat * Math.PI) / 180), 1e-6);
+    const cosLat = Math.cos((midLat * Math.PI) / 180);
+    const lngSpan = Math.max((maxLng - minLng) * cosLat, 1e-6);
     const latSpan = Math.max(maxLat - minLat, 1e-6);
 
-    const width = 100;
+    // 画布加宽，给两侧标签留足空间：实测 100 宽时长地名会被容器裁切
+    const width = 150;
     const height = 62;
-    const pad = 14;
-    // 用同一比例尺映射两个方向，保持真实相对形状
-    const scale = Math.min((width - pad * 2) / lngSpan, (height - pad * 2) / latSpan);
+    // 左右标签带宽度，点只画在中间区域
+    const labelBand = 46;
+    const padY = 9;
+    const plotLeft = labelBand;
+    const plotRight = width - labelBand;
+    const scale = Math.min((plotRight - plotLeft) / lngSpan, (height - padY * 2) / latSpan);
     const drawnW = lngSpan * scale;
     const drawnH = latSpan * scale;
-    const offsetX = (width - drawnW) / 2;
-    const offsetY = (height - drawnH) / 2;
+    const offsetX = plotLeft + (plotRight - plotLeft - drawnW) / 2;
+    const offsetY = padY + (height - padY * 2 - drawnH) / 2;
 
-    const placed: Placed[] = points.map((p) => ({
+    const base = points.map((p) => ({
       stop: p.stop,
       index: p.index,
-      x: offsetX + ((p.lng - minLng) * Math.cos((midLat * Math.PI) / 180)) * scale,
+      x: offsetX + (p.lng - minLng) * cosLat * scale,
       // SVG y 轴向下，纬度越大越靠北，需翻转
       y: offsetY + (maxLat - p.lat) * scale,
-      labelAbove: false,
     }));
 
-    // 相距很近的站点标签会重叠（实测 0.1km 的两点标签完全叠在一起）。
-    // 按 y 排序后逐个检查，与前一个太近就把标签翻到上方，避免互相遮挡。
-    const sorted = [...placed].sort((a, b) => a.y - b.y);
-    for (let i = 1; i < sorted.length; i += 1) {
-      const prev = sorted[i - 1];
-      const cur = sorted[i];
-      const tooClose = Math.abs(cur.y - prev.y) < 7 && Math.abs(cur.x - prev.x) < 26;
-      if (tooClose && !prev.labelAbove) cur.labelAbove = true;
-    }
+    // 标签分配到左右两侧：按 x 排序，靠左的走左侧、靠右的走右侧，
+    // 再按各侧纵向均分，保证标签之间始终有固定间距、不重叠。
+    const midX = (plotLeft + plotRight) / 2;
+    const leftGroup = base.filter((p) => p.x <= midX).sort((a, b) => a.y - b.y);
+    const rightGroup = base.filter((p) => p.x > midX).sort((a, b) => a.y - b.y);
+
+    const assign = (group: typeof base, side: 'left' | 'right'): Placed[] => {
+      const count = group.length;
+      if (count === 0) return [];
+      const slotTop = 8;
+      const slotBottom = height - 6;
+      const step = count === 1 ? 0 : (slotBottom - slotTop) / (count - 1);
+      return group.map((p, i) => ({
+        ...p,
+        side,
+        labelX: side === 'left' ? labelBand - 4 : width - labelBand + 4,
+        labelY: count === 1 ? p.y : slotTop + step * i,
+      }));
+    };
+
+    const placed = [...assign(leftGroup, 'left'), ...assign(rightGroup, 'right')]
+      .sort((a, b) => a.index - b.index);
 
     return { placed, width, height };
   }, [stops]);
@@ -90,11 +112,13 @@ export default function RouteMap({ stops, activeId, className }: RouteMapProps) 
   }
 
   const { placed, width, height } = layout;
-  const path = placed.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
+  // 按行程顺序连线
+  const ordered = [...placed].sort((a, b) => a.index - b.index);
+  const routePath = ordered.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
 
   return (
     <div className={`rounded-2xl border bg-card p-3 ${className || ''}`}>
-      <div className="mb-2 flex items-center justify-between">
+      <div className="mb-2 flex items-center justify-between gap-2">
         <span className="text-xs font-bold">位置关系示意图</span>
         <span className="text-[10px] text-muted-foreground">按真实坐标等比投影 · 非导航地图</span>
       </div>
@@ -102,9 +126,8 @@ export default function RouteMap({ stops, activeId, className }: RouteMapProps) 
         viewBox={`0 0 ${width} ${height}`}
         className="h-auto w-full"
         role="img"
-        aria-label={`路线位置示意：${placed.map((p) => p.stop.name).join(' 到 ')}`}
+        aria-label={`路线位置示意：${ordered.map((p) => p.stop.name).join(' 到 ')}`}
       >
-        {/* 参考网格，帮助感知相对距离 */}
         <defs>
           <pattern id="route-grid" width="10" height="10" patternUnits="userSpaceOnUse">
             <path d="M10 0 L0 0 0 10" fill="none" stroke="currentColor" strokeWidth="0.2" className="text-border" />
@@ -112,29 +135,74 @@ export default function RouteMap({ stops, activeId, className }: RouteMapProps) 
         </defs>
         <rect width={width} height={height} fill="url(#route-grid)" />
 
-        {/* 连线：先画整体路径 */}
-        <path d={path} fill="none" stroke="currentColor" strokeWidth="0.9" strokeDasharray="2 1.4" className="text-primary/55" />
+        {/* 行程连线 */}
+        <path d={routePath} fill="none" stroke="currentColor" strokeWidth="1" strokeDasharray="2.4 1.6" className="text-primary/50" />
 
-        {/* 每段中点标注距离 */}
-        {placed.slice(1).map((p, i) => {
-          const prev = placed[i];
+        {/* 相邻站点间距。沿线段法线偏移，避免与站点标记重叠（实测会被圆点压住） */}
+        {ordered.slice(1).map((p, i) => {
+          const prev = ordered[i];
           const km = p.stop.legKm;
           if (km === null || km === undefined) return null;
+          const midX = (prev.x + p.x) / 2;
+          const midY = (prev.y + p.y) / 2;
+          const dx = p.x - prev.x;
+          const dy = p.y - prev.y;
+          const len = Math.hypot(dx, dy) || 1;
+          // 短线段（两点相距很近）时圆点几乎盖满整段，需要更大的法线偏移才能露出文字
+          const offset = len < 12 ? 6.2 : 3.6;
+          const nx = (-dy / len) * offset;
+          const ny = (dx / len) * offset;
           return (
             <text
               key={`leg-${p.stop.id}`}
-              x={(prev.x + p.x) / 2}
-              y={(prev.y + p.y) / 2 - 1.2}
+              x={midX + nx}
+              y={midY + ny}
               textAnchor="middle"
+              dominantBaseline="middle"
               className="fill-muted-foreground"
-              style={{ fontSize: '3px', paintOrder: 'stroke', stroke: 'var(--card)', strokeWidth: '1.1px', strokeLinejoin: 'round' }}
+              style={{ fontSize: '3.1px', paintOrder: 'stroke', stroke: 'var(--card)', strokeWidth: '1.4px', strokeLinejoin: 'round' }}
             >
               {km} km
             </text>
           );
         })}
 
-        {/* 站点标记 */}
+        {/* 引出折线 + 外侧标签 */}
+        {placed.map((p) => {
+          const active = activeId === p.stop.id;
+          // 折线：从点水平走一小段，再斜向标签，最后水平接入文字
+          const elbowX = p.side === 'left' ? p.labelX + 5 : p.labelX - 5;
+          const leaderPath = `M${p.x.toFixed(2)},${p.y.toFixed(2)} L${elbowX.toFixed(2)},${p.labelY.toFixed(2)} L${p.labelX.toFixed(2)},${p.labelY.toFixed(2)}`;
+          // 标签带宽 46，字号 3.4，扣掉序号与间距后约可容纳 10 个中文字符。
+          // 超长地名（如"上海大自然野生昆虫馆(东方明珠…"）会溢出 viewBox，需截断。
+          const clean = p.stop.name.replace(/[（(][^）)]*[）)]/g, '').trim() || p.stop.name;
+          const label = clean.length > 10 ? `${clean.slice(0, 10)}…` : clean;
+          return (
+            <g key={`leader-${p.stop.id}`}>
+              <path
+                d={leaderPath}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="0.35"
+                className={active ? 'text-primary' : 'text-border'}
+              />
+              <circle cx={p.labelX} cy={p.labelY} r="0.7" className={active ? 'fill-primary' : 'fill-muted-foreground/60'} />
+              <text
+                x={p.side === 'left' ? p.labelX - 2 : p.labelX + 2}
+                y={p.labelY}
+                textAnchor={p.side === 'left' ? 'end' : 'start'}
+                dominantBaseline="middle"
+                className={active ? 'fill-foreground font-bold' : 'fill-muted-foreground'}
+                style={{ fontSize: '3.4px' }}
+              >
+                {p.index + 1}. {label}
+                <title>{p.stop.name}</title>
+              </text>
+            </g>
+          );
+        })}
+
+        {/* 站点标记，画在引出线之上 */}
         {placed.map((p) => {
           const active = activeId === p.stop.id;
           return (
@@ -142,10 +210,10 @@ export default function RouteMap({ stops, activeId, className }: RouteMapProps) 
               <circle
                 cx={p.x}
                 cy={p.y}
-                r={active ? 3.4 : 2.6}
+                r={active ? 3.3 : 2.7}
                 className={active ? 'fill-primary' : 'fill-primary/85'}
-                stroke="white"
-                strokeWidth="0.7"
+                stroke="var(--card)"
+                strokeWidth="0.8"
               />
               <text
                 x={p.x}
@@ -155,15 +223,6 @@ export default function RouteMap({ stops, activeId, className }: RouteMapProps) 
                 style={{ fontSize: '3.1px' }}
               >
                 {p.index + 1}
-              </text>
-              <text
-                x={p.x}
-                y={p.labelAbove ? p.y - 4.4 : p.y + 6.4}
-                textAnchor="middle"
-                className={active ? 'fill-foreground font-bold' : 'fill-muted-foreground'}
-                style={{ fontSize: '3.2px', paintOrder: 'stroke', stroke: 'var(--card)', strokeWidth: '1.1px', strokeLinejoin: 'round' }}
-              >
-                {p.stop.name.length > 11 ? `${p.stop.name.slice(0, 11)}…` : p.stop.name}
               </text>
             </g>
           );
