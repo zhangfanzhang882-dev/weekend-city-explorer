@@ -159,7 +159,7 @@ function parseJsonObject(raw: string) {
 
 async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awaited<ReturnType<typeof getPois>>, env: Env) {
   const baseUrl = (env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '');
-  const prompt = `你是周末城市路线规划师。请严格从候选地点中选择，不得创造新地点或修改地点名称。\n\n用户条件：${JSON.stringify(request)}\n天气：${JSON.stringify(weather)}\n候选地点：${JSON.stringify(pois)}\n\n生成3条差异明显的一日路线，每条选3个不同地点，并考虑天气、区域顺路、预算和兴趣。只返回JSON：{"routes":[{"title":"","subtitle":"","accent":"","weatherFit":"","stopNames":["候选地点原名"]}]}`;
+  const prompt = `你是周末城市路线规划师。请严格从候选地点中选择，不得创造新地点或修改地点名称。\n\n用户条件：${JSON.stringify(request)}\n天气：${JSON.stringify(weather)}\n候选地点：${JSON.stringify(pois)}\n\n生成3条差异明显的一日路线，每条选3个不同地点，并考虑天气、区域顺路、预算和兴趣。\n\n字段要求：\n- accent：该路线的主题标签，4到6个汉字，例如“室内避雨”“城市漫步”，不要填颜色值或色号。\n- weatherFit：用不超过20个汉字说明这条路线为什么适合当天天气，只描述天气与场地的关系，不要复述日期或预报范围。\n\n只返回JSON：{"routes":[{"title":"","subtitle":"","accent":"","weatherFit":"","stopNames":["候选地点原名"]}]}`;
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -180,17 +180,30 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
   if (!response.ok) throw new Error(`AI 服务暂不可用：${safeText(payload.error?.message, 120) || response.status}`);
   const drafts = parseJsonObject(payload.choices?.[0]?.message?.content || '').routes ?? [];
   const poiMap = new Map(pois.map((poi) => [poi.name, poi]));
+  // AI 偶尔会把色号填进 accent、把日期范围复述进 weatherFit，这里做服务端兜底清洗。
+  const cleanAccent = (value: unknown) => {
+    const text = safeText(value, 12);
+    return /^#|rgb|^[0-9a-f]{6}$/i.test(text) ? '' : text;
+  };
+  const cleanWeatherFit = (value: unknown) => {
+    const text = safeText(value, 30);
+    return /尚未进入预报窗口|预报范围|\d{4}-\d{2}/.test(text) ? '' : text;
+  };
   const valid = drafts.slice(0, 3).map((draft, routeIndex) => {
     const selected = (draft.stopNames || []).map((name) => poiMap.get(name)).filter(Boolean).slice(0, 3) as typeof pois;
     if (selected.length < 3) return null;
+    const knownCosts = selected.filter((poi) => poi.cost > 0);
     return {
       id: `ai-${routeIndex + 1}`,
       title: safeText(draft.title, 24),
       subtitle: safeText(draft.subtitle, 44),
-      accent: safeText(draft.accent, 12),
-      weatherFit: safeText(draft.weatherFit, 30),
+      accent: cleanAccent(draft.accent),
+      weatherFit: cleanWeatherFit(draft.weatherFit),
       totalTime: `${selected.length * 2} 小时`,
       budget: selected.reduce((sum, poi) => sum + poi.cost, 0),
+      // 高德多数 POI 无价格数据，需区分“真的免费”与“暂无数据”，避免误导为全程 0 元。
+      budgetKnownCount: knownCosts.length,
+      budgetTotalCount: selected.length,
       stops: selected.map((poi, stopIndex) => ({
         id: `${routeIndex + 1}-${poi.id || stopIndex}`,
         name: poi.name,
@@ -198,6 +211,7 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
         area: poi.area,
         duration: '约 2 小时',
         cost: poi.cost,
+        hasCostData: poi.cost > 0,
         source: poi.source,
         reason: `${poi.address || poi.area}${poi.rating ? ` · 高德评分 ${poi.rating}` : ''}`,
       })),

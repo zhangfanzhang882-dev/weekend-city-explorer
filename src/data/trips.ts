@@ -1,4 +1,4 @@
-// EXPORTS: IStop{id,name,type,area,duration,cost,source,reason}, IRoute{id,title,subtitle,totalTime,budget,weatherFit,accent,stops}, ROUTES
+// EXPORTS: IStop{id,name,type,area,duration,cost,hasCostData?,source,reason}, IRoute{id,title,subtitle,totalTime,budget,budgetKnownCount?,budgetTotalCount?,weatherFit,accent,stops}, ROUTES
 export interface IStop {
   id: string;
   name: string;
@@ -6,6 +6,8 @@ export interface IStop {
   area: string;
   duration: string;
   cost: number;
+  /** 该地点是否有真实价格数据；缺失时前端显示“暂无价格”而非 ¥0 */
+  hasCostData?: boolean;
   source: string[];
   reason: string;
 }
@@ -16,6 +18,9 @@ export interface IRoute {
   subtitle: string;
   totalTime: string;
   budget: number;
+  /** 有价格数据的地点数，用于区分“真的免费”与“暂无数据” */
+  budgetKnownCount?: number;
+  budgetTotalCount?: number;
   weatherFit: string;
   accent: string;
   stops: IStop[];

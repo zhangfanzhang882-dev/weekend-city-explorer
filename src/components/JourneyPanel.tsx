@@ -40,7 +40,7 @@ export default function JourneyPanel({ route, onBack, onPublished }: JourneyPane
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-secondary font-black">{index + 1}</div>
                   <div>
                     <div className="flex flex-wrap items-center gap-2"><h3 className="font-bold">{status === 'replaced' ? `${stop.name}附近室内替代点` : stop.name}</h3><Badge variant="outline">{status === 'pending' ? '待出发' : status === 'checked' ? '已打卡' : status === 'skipped' ? '已跳过' : '已替换'}</Badge></div>
-                    <p className="mt-1 text-sm text-muted-foreground">{stop.area} · {stop.duration} · ¥{stop.cost}</p>
+                    <p className="mt-1 text-sm text-muted-foreground">{stop.area} · {stop.duration} · {stop.cost > 0 ? `¥${stop.cost}` : '价格暂无数据'}</p>
                     <div className="mt-2 flex gap-1.5">{stop.source.map((source) => <span key={source} className="rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground">参考 {source}</span>)}</div>
                   </div>
                 </div>
