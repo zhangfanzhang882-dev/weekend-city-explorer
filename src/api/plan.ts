@@ -120,3 +120,33 @@ export async function searchPlaces(keyword: string, city: string): Promise<IStop
     return [];
   }
 }
+
+/** 自然语言解析出的出行参数 */
+export interface IParsedIntent {
+  city: string;
+  areas: string[];
+  date: string;
+  endDate: string;
+  interests: string[];
+  budgetTier: string;
+  /** 一句话复述解析结果，供用户确认 */
+  summary: string;
+  /** 用户未明说、采用了默认值的字段 */
+  assumed: string[];
+}
+
+export interface IIntentResponse {
+  intent: IParsedIntent;
+  /** 该城市真实区县列表，便于前端同步区域选项 */
+  availableAreas: string[];
+}
+
+/** 把一句话出行需求解析成结构化参数 */
+export async function parseIntent(text: string, today: string, defaultCity: string): Promise<IIntentResponse> {
+  const response = await fetch('/api/intent', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text, today, defaultCity }),
+  });
+  return parseResponse<IIntentResponse>(response, '暂时无法理解这句话，请换个说法');
+}

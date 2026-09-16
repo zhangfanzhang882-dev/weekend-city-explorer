@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CalendarDays, CloudSun, LocateFixed, MapPin, Plus, Search, Sparkles, Wand2, X } from 'lucide-react';
+import { CalendarDays, CloudSun, LocateFixed, MapPin, Plus, Search, Sparkles, Wand2, WandSparkles, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import JourneyPanel from '@/components/JourneyPanel';
 import RouteCard from '@/components/RouteCard';
-import { createAiPlan, fetchAreas, searchCities, type ICityOption, type IPlanResponse } from '@/api/plan';
+import { createAiPlan, fetchAreas, parseIntent, searchCities, type ICityOption, type IPlanResponse } from '@/api/plan';
 import type { IRoute } from '@/data/trips';
 
 type Screen = 'plan' | 'routes' | 'journey' | 'published';
@@ -89,6 +90,11 @@ export default function HomePage() {
   const [error, setError] = useState('');
   const [sortBy, setSortBy] = useState<'recommend' | 'distance' | 'rating' | 'cheap'>('recommend');
   const [onlyOpen, setOnlyOpen] = useState(false);
+  // 自然语言意图输入
+  const [intentText, setIntentText] = useState('');
+  const [parsing, setParsing] = useState(false);
+  const [intentSummary, setIntentSummary] = useState('');
+  const [intentAssumed, setIntentAssumed] = useState<string[]>([]);
   const cityBoxRef = useRef<HTMLDivElement>(null);
 
   // 城市关键词搜索：防抖 300ms，避免逐字符打接口
@@ -184,6 +190,36 @@ export default function HomePage() {
     setInterests((current) => current.includes(interest)
       ? current.filter((item) => item !== interest)
       : current.length >= 6 ? current : [...current, interest]);
+  };
+
+  /**
+   * 解析一句话需求并回填表单。
+   * 不直接生成路线——解析可能有偏差，让用户先核对再点生成，保留修正权。
+   */
+  const applyIntent = async () => {
+    const text = intentText.trim();
+    if (text.length < 2) return;
+    setParsing(true);
+    setError('');
+    setIntentSummary('');
+    try {
+      const { intent, availableAreas } = await parseIntent(text, TODAY, city);
+      setCity(intent.city);
+      setCityInput(intent.city);
+      if (availableAreas.length > 0) setAreas(availableAreas);
+      setSelectedAreas(intent.areas);
+      setStartDate(intent.date);
+      setEndDate(intent.endDate);
+      setInterests(intent.interests);
+      const tier = BUDGET_TIERS.find((item) => item.label === intent.budgetTier);
+      if (tier) setBudgetTier(tier.key);
+      setIntentSummary(intent.summary || '已按你的描述填好条件');
+      setIntentAssumed(intent.assumed);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '解析失败，请换个说法或手动填写');
+    } finally {
+      setParsing(false);
+    }
   };
 
   const generatePlan = async () => {
@@ -326,6 +362,70 @@ export default function HomePage() {
             <div className="absolute -right-16 -top-16 h-44 w-44 rounded-full bg-accent/70 blur-3xl" />
             <div className="relative">
               <div className="mb-6 flex items-center justify-between"><div><div className="text-xs font-bold uppercase tracking-[0.18em] text-primary">Plan your trip</div><h2 className="mt-1 text-2xl font-black">这次想去哪？</h2></div><CloudSun className="text-primary" size={30} /></div>
+
+              {/* 自然语言入口：一句话说清需求，自动填好下方条件 */}
+              <div className="mb-5 rounded-2xl border border-primary/30 bg-primary/5 p-4">
+                <div className="mb-2 flex items-center gap-1.5 text-sm font-bold text-primary">
+                  <WandSparkles size={15} />一句话说清就行
+                </div>
+                <Textarea
+                  aria-label="用一句话描述出行需求"
+                  placeholder="例如：这周末想在静安区看看展览喝咖啡，尽量少花钱"
+                  value={intentText}
+                  maxLength={200}
+                  rows={2}
+                  className="resize-none bg-card"
+                  onChange={(event) => setIntentText(event.target.value)}
+                  onKeyDown={(event) => {
+                    // Enter 直接解析，Shift+Enter 换行
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault();
+                      void applyIntent();
+                    }
+                  }}
+                />
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    disabled={parsing || intentText.trim().length < 2}
+                    onClick={() => void applyIntent()}
+                  >
+                    {parsing ? '正在理解…' : '帮我填好条件'}
+                  </Button>
+                  {!intentText.trim() && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {[
+                        '明天下午想在杨浦区逛书店和咖啡馆',
+                        '周末带朋友去杭州西湖区看展，预算宽松',
+                      ].map((sample) => (
+                        <button
+                          key={sample}
+                          onClick={() => setIntentText(sample)}
+                          className="rounded-full border bg-card px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted"
+                        >{sample}</button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {intentSummary && (
+                  <div className="mt-3 rounded-xl bg-card p-3 text-xs">
+                    <div className="font-semibold text-primary">已填好：{intentSummary}</div>
+                    {intentAssumed.length > 0 && (
+                      <div className="mt-1 text-muted-foreground">
+                        以下按默认值处理，可在下方修改：{intentAssumed.join('、')}
+                      </div>
+                    )}
+                    <div className="mt-1 text-muted-foreground">请核对下方条件，确认后点「生成我的路线」</div>
+                  </div>
+                )}
+              </div>
+
+              <div className="mb-4 flex items-center gap-3">
+                <span className="h-px flex-1 bg-border" />
+                <span className="text-xs text-muted-foreground">或手动填写</span>
+                <span className="h-px flex-1 bg-border" />
+              </div>
+
               <div className="space-y-5">
                 <div ref={cityBoxRef} className="relative">
                   <label className="mb-2 block text-sm font-bold" htmlFor="city-input">出发城市</label>
