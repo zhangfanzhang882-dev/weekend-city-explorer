@@ -173,7 +173,14 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
           trip: { title: route.title, stage: nextStage, stops, checkIns, members, city, date, endDate },
         }),
       });
-      const payload = await response.json() as { id?: string; persistent?: boolean; error?: string };
+      const rawText = await response.text();
+      let payload: { id?: string; persistent?: boolean; error?: string } = {};
+      try {
+        payload = JSON.parse(rawText);
+      } catch {
+        // 上游返回 HTML 错误页时给出可读提示，而非原始 JSON 解析错误
+        throw new Error(`保存失败：服务暂时不可用（HTTP ${response.status}），请稍后重试`);
+      }
       if (!response.ok) throw new Error(payload.error || '保存失败');
       if (payload.id) setTripId(payload.id);
       setPersistent(payload.persistent !== false);

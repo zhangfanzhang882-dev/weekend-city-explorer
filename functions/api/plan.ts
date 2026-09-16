@@ -173,7 +173,14 @@ async function amapGet(path: string, params: Record<string, string>, key: string
   const url = new URL(`https://restapi.amap.com${path}`);
   Object.entries({ ...params, key }).forEach(([name, value]) => url.searchParams.set(name, value));
   const response = await fetch(url.toString());
-  const data = await response.json() as Record<string, unknown>;
+  // 高德异常时可能返回 HTML 或空响应，直接 .json() 会抛出难以理解的解析错误
+  const rawText = await response.text();
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(rawText) as Record<string, unknown>;
+  } catch {
+    throw new Error(`高德服务返回异常响应（HTTP ${response.status}），请稍后重试`);
+  }
   if (!response.ok || data.status !== '1') {
     throw new Error(`高德服务暂不可用：${safeText(data.info, 80) || response.status}`);
   }
@@ -392,8 +399,26 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
       ],
     }),
   });
-  const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } };
-  if (!response.ok) throw new Error(`AI 服务暂不可用：${safeText(payload.error?.message, 120) || response.status}`);
+  // 上游可能返回 HTML 错误页（如 Cloudflare 520、网关超时），
+  // 直接 .json() 会抛出 "Unexpected token 'e'" 这类对用户无意义的原始错误，
+  // 因此先取文本再尝试解析，并把非 JSON 响应转成可读提示。
+  const rawText = await response.text();
+  let payload: { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } } = {};
+  let parseFailed = false;
+  try {
+    payload = JSON.parse(rawText);
+  } catch {
+    parseFailed = true;
+  }
+
+  if (!response.ok) {
+    const detail = safeText(payload.error?.message, 120)
+      || (parseFailed ? `上游返回异常响应（HTTP ${response.status}）` : String(response.status));
+    throw new Error(`AI 服务暂不可用：${detail}。请稍后重试。`);
+  }
+  if (parseFailed) {
+    throw new Error('AI 服务返回了非预期内容，请稍后重试。');
+  }
   const drafts = parseJsonObject(payload.choices?.[0]?.message?.content || '').routes ?? [];
   const poiMap = new Map(pois.map((poi) => [poi.name, poi]));
   // AI 偶尔会把色号填进 accent、把日期范围复述进 weatherFit，这里做服务端兜底清洗。
