@@ -12,12 +12,16 @@ type Screen = 'plan' | 'routes' | 'journey' | 'published';
 
 const PRESET_INTERESTS = ['展览', '市集', '演出', '公园', '历史', '咖啡', '徒步', '书店'];
 
-/** 预算档位：用档位替代精确数值，降低填写负担；amount 仅作为传给 AI 的参考值 */
+/**
+ * 预算档位。
+ * 只表达相对消费取向，不写具体金额——同一档位在不同城市、不同场馆的实际花费差异很大，
+ * 写死数字会误导用户，也会让 AI 按错误的价格假设选点。
+ */
 const BUDGET_TIERS = [
-  { key: 'free', label: '穷游党', desc: '尽量免费', amount: 50 },
-  { key: 'thrifty', label: '经济实惠', desc: '100 元上下', amount: 100 },
-  { key: 'comfy', label: '舒适适中', desc: '300 元左右', amount: 300 },
-  { key: 'rich', label: '土豪随意', desc: '不看价格', amount: 1500 },
+  { key: 'free', label: '穷游党', desc: '只挑免费场所', hint: '优先免费开放的公园、公共展区、街区' },
+  { key: 'thrifty', label: '经济实惠', desc: '尽量少花钱', hint: '免费为主，可接受少量低价门票' },
+  { key: 'comfy', label: '舒适适中', desc: '该花就花', hint: '不刻意省，愿意为好体验买票' },
+  { key: 'rich', label: '土豪随意', desc: '不看价格', hint: '只按体验和口碑挑，不考虑花费' },
 ] as const;
 
 // 点击输入框即展示的默认城市，避免用户面对空白下拉不知道能填什么
@@ -192,8 +196,9 @@ export default function HomePage() {
         areas: selectedAreas,
         date: startDate,
         endDate,
-        budget: tier.amount,
+        // 只传消费取向，不传金额：具体价格因城市和场馆而异，写死数字会误导选点
         budgetTier: tier.label,
+        budgetHint: tier.hint,
         interests,
         partySize: 2,
       });
@@ -470,13 +475,14 @@ export default function HomePage() {
                 </div>
 
                 <div>
-                  <span className="mb-2 block text-sm font-bold">预算档位</span>
+                  <span className="mb-2 block text-sm font-bold">消费取向</span>
                   <div className="grid grid-cols-2 gap-2">
                     {BUDGET_TIERS.map((tier) => (
                       <button
                         key={tier.key}
                         onClick={() => setBudgetTier(tier.key)}
                         aria-pressed={budgetTier === tier.key}
+                        title={tier.hint}
                         className={`rounded-xl border px-3 py-2.5 text-left transition ${budgetTier === tier.key ? 'border-primary bg-primary text-primary-foreground' : 'bg-card hover:bg-muted'}`}
                       >
                         <span className="block text-sm font-bold">{tier.label}</span>
@@ -484,7 +490,9 @@ export default function HomePage() {
                       </button>
                     ))}
                   </div>
-                  <p className="mt-2 text-xs text-muted-foreground">高德多数场馆无票价数据，档位主要用于筛选与文案取向</p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {BUDGET_TIERS.find((tier) => tier.key === budgetTier)?.hint}
+                  </p>
                 </div>
 
                 {error && <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{error}</div>}

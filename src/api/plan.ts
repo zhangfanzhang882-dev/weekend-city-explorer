@@ -41,9 +41,10 @@ export interface IPlanInput {
   areas: string[];
   date: string;
   endDate: string;
-  budget: number;
-  /** 预算档位名称，如「经济实惠」 */
+  /** 预算档位名称，如「经济实惠」；不含具体金额 */
   budgetTier: string;
+  /** 该档位的消费取向说明，供 AI 理解选点偏好 */
+  budgetHint: string;
   interests: string[];
   partySize: number;
 }
