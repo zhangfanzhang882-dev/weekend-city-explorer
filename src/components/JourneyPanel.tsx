@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight, Check, CircleDollarSign, Copy, Flag, ImageOff, Link2, MapPin, MessageSquare,
-  Navigation, Pencil, Plus, RotateCcw, Share2, SkipForward, Star, Trash2, Users,
+  Navigation, Pencil, Plus, RotateCcw, Search, Share2, SkipForward, Star, Trash2, Users,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import RouteMap from '@/components/RouteMap';
+import { searchPlaces } from '@/api/plan';
 import { getSampleReviews } from '@/data/sampleReviews';
 import type { ICheckIn, IRoute, IStop } from '@/data/trips';
 
@@ -118,6 +119,12 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
   const [draftRating, setDraftRating] = useState(0);
   const [draftText, setDraftText] = useState('');
   const [swapFor, setSwapFor] = useState<IStop | null>(null);
+  // 地点选择器状态：用单一 mode 表示当前用途，避免 swapFor 与 addOpen 两个布尔量
+  // 相互覆盖导致替换后弹窗切换成「加入新地点」而不关闭
+  const [pickerMode, setPickerMode] = useState<'closed' | 'swap' | 'add'>('closed');
+  const [placeQuery, setPlaceQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<IStop[]>([]);
+  const [searching, setSearching] = useState(false);
   const [tripId, setTripId] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -126,6 +133,34 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
 
   const usedNames = useMemo(() => new Set(stops.map((item) => item.name)), [stops]);
   const availableCandidates = candidates.filter((item) => !usedNames.has(item.name));
+
+  // 关键词搜索真实地点，防抖 400ms 避免逐字打接口；仅弹窗打开时生效。
+  // 所有 setState 都放进 timeout 回调，避免 effect 内同步更新引发级联渲染。
+  useEffect(() => {
+    const keyword = placeQuery.trim();
+    const active = pickerMode !== 'closed';
+    const timer = window.setTimeout(() => {
+      if (!active || keyword.length < 1) {
+        setSearchResults([]);
+        setSearching(false);
+        return;
+      }
+      setSearching(true);
+      void searchPlaces(keyword, city || '上海')
+        .then((list) => setSearchResults(list.filter((item) => !usedNames.has(item.name))))
+        .finally(() => setSearching(false));
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [placeQuery, pickerMode, city, usedNames]);
+
+  /** 关闭弹窗时清理搜索状态，避免下次打开残留上次结果 */
+  const closePicker = () => {
+    setPickerMode('closed');
+    setSwapFor(null);
+    setPlaceQuery('');
+    setSearchResults([]);
+    setSearching(false);
+  };
 
   // 行程被编辑后服务端距离失效，按当前顺序重算
   const stopsWithDistance = useMemo(() => stops.map((stop, index) => {
@@ -155,10 +190,13 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
   const swapStop = (replacement: IStop) => {
     if (!swapFor) return;
     setStops((prev) => prev.map((item) => (item.id === swapFor.id ? { ...replacement, id: swapFor.id } : item)));
-    setSwapFor(null);
+    closePicker();
   };
 
-  const addStop = (extra: IStop) => setStops((prev) => [...prev, { ...extra, id: `extra-${extra.name}-${prev.length}` }]);
+  const addStop = (extra: IStop) => {
+    setStops((prev) => [...prev, { ...extra, id: `extra-${extra.name}-${prev.length}` }]);
+    closePicker();
+  };
 
   /** 保存行程到服务端；组队与完成阶段需要落库以便分享 */
   const persist = async (nextStage: Stage) => {
@@ -307,7 +345,7 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
                           <div className="flex flex-wrap gap-1.5 sm:justify-end">
                             <Button size="sm" variant="ghost" disabled={index === 0} onClick={() => move(index, -1)}>上移</Button>
                             <Button size="sm" variant="ghost" disabled={index === stops.length - 1} onClick={() => move(index, 1)}>下移</Button>
-                            <Button size="sm" variant="ghost" onClick={() => setSwapFor(stop)} disabled={availableCandidates.length === 0}><RotateCcw size={14} />换地点</Button>
+                            <Button size="sm" variant="ghost" onClick={() => { setPlaceQuery(''); setSwapFor(stop); setPickerMode('swap'); }}><RotateCcw size={14} />换地点</Button>
                             <Button size="sm" variant="ghost" className="text-destructive" disabled={stops.length <= 2} onClick={() => removeStop(stop.id)}><Trash2 size={14} />删除</Button>
                           </div>
                         )}
@@ -354,16 +392,28 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
           </div>
 
           {/* 仅规划阶段允许追加地点 */}
-          {editable && availableCandidates.length > 0 && (
+          {editable && (
             <div className="mt-4 rounded-3xl border border-dashed p-5">
-              <div className="mb-3 flex items-center gap-1.5 text-sm font-bold"><Plus size={14} />加入其他真实地点</div>
-              <div className="flex flex-wrap gap-2">
-                {availableCandidates.slice(0, 8).map((item) => (
-                  <button key={item.name} onClick={() => addStop(item)} className="rounded-full border px-3 py-1.5 text-sm hover:bg-muted">
-                    {item.name}{item.rating ? ` · ${item.rating}` : ''}
-                  </button>
-                ))}
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-sm font-bold"><Plus size={14} />加入其他地点</span>
+                <Button size="sm" variant="outline" onClick={() => { setPlaceQuery(''); setSwapFor(null); setPickerMode('add'); }}>
+                  <Search size={14} />搜索地点
+                </Button>
               </div>
+              {availableCandidates.length > 0 ? (
+                <>
+                  <div className="mb-2 text-xs text-muted-foreground">从本次候选中快速添加，或点右上角搜索全城</div>
+                  <div className="flex flex-wrap gap-2">
+                    {availableCandidates.slice(0, 8).map((item) => (
+                      <button key={item.name} onClick={() => addStop(item)} className="rounded-full border px-3 py-1.5 text-sm hover:bg-muted">
+                        {item.name}{item.rating ? ` · ${item.rating}` : ''}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="text-xs text-muted-foreground">候选已全部加入，可点「搜索地点」查找其他地方</div>
+              )}
             </div>
           )}
 
@@ -474,27 +524,76 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
         </DialogContent>
       </Dialog>
 
-      {/* 替换地点弹窗：仅规划阶段可用 */}
-      <Dialog open={Boolean(swapFor) && editable} onOpenChange={(open) => !open && setSwapFor(null)}>
+      {/* 地点选择器：换地点与加地点共用，都支持搜索全城真实地点 */}
+      <Dialog open={pickerMode !== 'closed' && editable} onOpenChange={(open) => !open && closePicker()}>
         <DialogContent className="rounded-3xl">
           <DialogHeader>
-            <DialogTitle>替换「{swapFor?.name}」</DialogTitle>
-            <DialogDescription>从同城真实候选地点中换一个。</DialogDescription>
+            <DialogTitle>{pickerMode === 'swap' && swapFor ? `替换「${swapFor.name}」` : '加入新地点'}</DialogTitle>
+            <DialogDescription>
+              搜索{city || '本市'}的真实地点，或从本次候选中选择。
+            </DialogDescription>
           </DialogHeader>
-          <div className="max-h-80 space-y-2 overflow-y-auto py-2">
-            {availableCandidates.map((item) => (
-              <button key={item.name} onClick={() => swapStop(item)} className="flex w-full items-center gap-3 rounded-2xl border p-3 text-left hover:bg-muted">
-                <StopPhoto stop={item} size="w-14" />
-                <span className="min-w-0">
-                  <span className="block font-semibold">{item.name}</span>
-                  <span className="block text-xs text-muted-foreground">{item.area}{item.rating ? ` · 评分 ${item.rating}` : ''}</span>
-                </span>
-              </button>
-            ))}
+
+          <div className="space-y-3 py-1">
+            <Input
+              aria-label="搜索地点"
+              placeholder="输入地点名或类型，如 咖啡、美术馆、外滩"
+              value={placeQuery}
+              maxLength={20}
+              autoFocus
+              onChange={(event) => setPlaceQuery(event.target.value)}
+            />
+
+            <div className="max-h-72 space-y-2 overflow-y-auto">
+              {/* 输入后立即显示等待态：searching 要等防抖结束才置位，此处用结果是否匹配当前词兜底 */}
+              {placeQuery.trim() && (searching || searchResults.length === 0) && (
+                <div className="py-6 text-center text-sm text-muted-foreground">
+                  {searching ? '搜索中…' : `没找到「${placeQuery.trim()}」相关地点，换个词试试`}
+                </div>
+              )}
+
+              {!searching && searchResults.length > 0 && (
+                <>
+                  <div className="px-1 text-[11px] font-bold text-muted-foreground">搜索结果 · 高德地图</div>
+                  {searchResults.map((item) => (
+                    <PlaceOption key={item.id} stop={item} onPick={() => (pickerMode === 'swap' ? swapStop(item) : addStop(item))} />
+                  ))}
+                </>
+              )}
+
+              {!placeQuery.trim() && (
+                availableCandidates.length > 0 ? (
+                  <>
+                    <div className="px-1 text-[11px] font-bold text-muted-foreground">本次候选地点</div>
+                    {availableCandidates.map((item) => (
+                      <PlaceOption key={item.id} stop={item} onPick={() => (pickerMode === 'swap' ? swapStop(item) : addStop(item))} />
+                    ))}
+                  </>
+                ) : (
+                  <div className="py-6 text-center text-sm text-muted-foreground">候选已全部加入，请用上方搜索</div>
+                )
+              )}
+            </div>
           </div>
         </DialogContent>
       </Dialog>
     </section>
+  );
+}
+
+/** 地点选项行：带实景图、区域与评分，供替换与添加复用 */
+function PlaceOption({ stop, onPick }: { stop: IStop; onPick: () => void }) {
+  return (
+    <button onClick={onPick} className="flex w-full items-center gap-3 rounded-2xl border p-3 text-left transition hover:bg-muted">
+      <StopPhoto stop={stop} size="w-14" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate font-semibold">{stop.name}</span>
+        <span className="block truncate text-xs text-muted-foreground">
+          {stop.area || stop.type}{stop.rating ? ` · 评分 ${stop.rating}` : ''}
+        </span>
+        {stop.address && <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{stop.address}</span>}
+      </span>
+    </button>
   );
 }
 

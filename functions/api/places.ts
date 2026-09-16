@@ -10,13 +10,13 @@ interface DistrictNode {
   districts?: DistrictNode[];
 }
 
-const json = (body: unknown, status = 200) =>
+const json = (body: unknown, status = 200, maxAge = 86400) =>
   new Response(JSON.stringify(body), {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
-      // 行政区数据变动极少，缓存可显著降低搜索时的接口压力与延迟
-      'cache-control': 'public, max-age=86400',
+      // 行政区与城市数据变动极少，长缓存可降低接口压力；POI 搜索结果缓存较短
+      'cache-control': `public, max-age=${maxAge}`,
     },
   });
 
@@ -24,7 +24,14 @@ async function amapGet(path: string, params: Record<string, string>, key: string
   const url = new URL(`https://restapi.amap.com${path}`);
   Object.entries({ ...params, key }).forEach(([name, value]) => url.searchParams.set(name, value));
   const response = await fetch(url.toString());
-  const data = await response.json() as Record<string, unknown>;
+  // 高德异常时可能返回 HTML，直接 .json() 会抛出难以理解的解析错误
+  const rawText = await response.text();
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(rawText) as Record<string, unknown>;
+  } catch {
+    throw new Error(`高德服务返回异常响应（HTTP ${response.status}），请稍后重试`);
+  }
   if (!response.ok || data.status !== '1') {
     throw new Error(`高德服务暂不可用：${String(data.info ?? response.status).slice(0, 80)}`);
   }
@@ -88,6 +95,57 @@ async function listAreas(city: string, key: string) {
   return areas.slice(0, 20);
 }
 
+/**
+ * 地点搜索：按关键词在指定城市内查找真实 POI。
+ * 用于行程编辑时"换地点"和"加入地点"，让用户不受初始候选池限制。
+ */
+async function searchPois(keyword: string, city: string, key: string) {
+  const data = await amapGet('/v3/place/text', {
+    keywords: keyword,
+    city,
+    citylimit: 'true',
+    offset: '12',
+    page: '1',
+    extensions: 'all',
+  }, key);
+
+  const toHttps = (url?: string) => (url || '').replace(/^http:\/\//, 'https://');
+  const flatten = (value?: string | string[]) => (Array.isArray(value) ? value.join('') : value || '');
+  const lowQuality = /(停车场|出入口|售票处|卫生间|公交站|地铁站出口)/;
+
+  const pois = (data.pois as Array<Record<string, unknown>> | undefined) ?? [];
+  const seen = new Set<string>();
+  const results: Array<Record<string, unknown>> = [];
+
+  for (const poi of pois) {
+    const name = String(poi.name ?? '');
+    const typeText = `${name} ${String(poi.type ?? '')}`;
+    if (!name || seen.has(name) || lowQuality.test(typeText)) continue;
+    seen.add(name);
+    const bizExt = (poi.biz_ext ?? {}) as { rating?: string; cost?: string };
+    results.push({
+      id: `search-${String(poi.id ?? results.length)}`,
+      name,
+      type: String(poi.type ?? '').split(';').at(-1) || '城市体验',
+      area: String(poi.adname ?? ''),
+      duration: '约 2 小时',
+      cost: Math.max(0, Math.round(Number(bizExt.cost || 0) || 0)),
+      hasCostData: Number(bizExt.cost || 0) > 0,
+      rating: Number(bizExt.rating || 0) || null,
+      address: flatten(poi.address as string | string[] | undefined),
+      tel: flatten(poi.tel as string | string[] | undefined).split(';')[0] || '',
+      location: String(poi.location ?? ''),
+      photos: ((poi.photos as Array<{ url?: string }> | undefined) ?? [])
+        .map((photo) => toHttps(photo.url))
+        .filter((url) => url.startsWith('https://'))
+        .slice(0, 3),
+      source: ['高德地图'],
+      reason: `${flatten(poi.address as string | string[] | undefined) || String(poi.adname ?? '')}${bizExt.rating ? ` · 高德评分 ${bizExt.rating}` : ''}`,
+    });
+  }
+  return results.slice(0, 12);
+}
+
 export async function onRequestGet(context: { request: Request; env: Env }) {
   try {
     if (!context.env.AMAP_WEB_SERVICE_KEY) {
@@ -103,10 +161,18 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       return json({ city, areas });
     }
 
+    if (mode === 'poi') {
+      const city = (url.searchParams.get('city') || '上海').trim().slice(0, 20);
+      if (keyword.length < 1) return json({ pois: [] }, 200, 60);
+      const pois = await searchPois(keyword, city, context.env.AMAP_WEB_SERVICE_KEY);
+      // POI 数据会变动（新开、歇业），只缓存 5 分钟
+      return json({ pois }, 200, 300);
+    }
+
     if (keyword.length < 1) return json({ cities: [] });
     const cities = await searchCities(keyword, context.env.AMAP_WEB_SERVICE_KEY);
     return json({ cities });
   } catch (error) {
-    return json({ error: error instanceof Error ? error.message : '查询失败' }, 502);
+    return json({ error: error instanceof Error ? error.message : '查询失败' }, 502, 0);
   }
 }

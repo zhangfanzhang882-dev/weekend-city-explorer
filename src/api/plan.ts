@@ -105,3 +105,18 @@ export async function fetchAreas(city: string): Promise<string[]> {
     return [];
   }
 }
+
+/**
+ * 按关键词搜索真实地点，用于行程编辑时换地点或加地点。
+ * 失败时返回空数组，前端仍可从初始候选池挑选。
+ */
+export async function searchPlaces(keyword: string, city: string): Promise<IStop[]> {
+  try {
+    const response = await fetch(`/api/places?mode=poi&q=${encodeURIComponent(keyword)}&city=${encodeURIComponent(city)}`);
+    if (!response.ok) return [];
+    const payload = await response.json() as { pois?: IStop[] };
+    return payload.pois ?? [];
+  } catch {
+    return [];
+  }
+}
