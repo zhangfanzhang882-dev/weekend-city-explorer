@@ -2,9 +2,14 @@ name = "weekend-city-explorer"
 compatibility_date = "2026-09-11"
 pages_build_output_dir = "./dist"
 
-# 行程与打卡数据存储。
-# 本地开发由 miniflare 自动模拟，无需真实命名空间；
-# 线上需在 Cloudflare 控制台 Settings → Bindings 添加同名 KV 绑定 TRIPS。
-[[kv_namespaces]]
-binding = "TRIPS"
-id = "placeholder_replace_in_dashboard"
+# KV 绑定说明（行程与打卡持久化）
+#
+# 这里不声明 kv_namespaces：Pages 构建会校验 id，写占位值会导致部署失败。
+# 线上请在 Cloudflare 控制台绑定，变量名必须为 TRIPS：
+#   Workers & Pages → weekend-city-explorer → Settings → Bindings
+#   → Add binding → KV namespace → Variable name: TRIPS
+#
+# 未绑定时 functions/api/trip.ts 会自动降级为内存存储，
+# 接口仍可用，但邀请链接无法跨设备打开。
+#
+# 本地开发（wrangler pages dev）由 miniflare 自动模拟 KV，无需配置。
