@@ -350,83 +350,85 @@ export default function HomePage() {
       </header>
 
       {screen === 'plan' && (
-        <section className="mx-auto grid max-w-6xl gap-10 px-4 pb-16 pt-8 sm:px-6 lg:grid-cols-[1.06fr_.94fr] lg:items-center lg:pt-14">
+        // 左侧承载主入口与说明，右侧为条件表单；items-start 让两栏顶部对齐，
+        // 避免右侧表单较长时左侧被垂直居中拉开距离
+        <section className="mx-auto grid max-w-6xl gap-8 px-4 pb-16 pt-8 sm:px-6 lg:grid-cols-2 lg:items-start lg:gap-10 lg:pt-14">
           <div>
             <div className="mb-5 inline-flex items-center gap-2 rounded-full bg-accent px-4 py-2 text-sm font-semibold text-accent-foreground"><Sparkles size={15} />先查真实天气与地点，再排路线</div>
-            <h1 className="max-w-2xl text-5xl font-black leading-[1.03] tracking-[-0.055em] sm:text-7xl">告诉我哪天有空，<br />路线我来安排。</h1>
-            <p className="mt-6 max-w-xl text-lg leading-8 text-muted-foreground">选好城市、日期和想看的东西，AI 会结合当天天气与真实地点，给你几条走得顺的路线。</p>
-            <div className="mt-8 grid grid-cols-3 gap-3 text-sm"><div className="rounded-2xl border bg-card p-3"><b className="block text-xl">实时</b><span className="text-muted-foreground">高德天气</span></div><div className="rounded-2xl border bg-card p-3"><b className="block text-xl">真实</b><span className="text-muted-foreground">高德地点</span></div><div className="rounded-2xl border bg-card p-3"><b className="block text-xl">AI</b><span className="text-muted-foreground">路线生成</span></div></div>
+            <h1 className="max-w-2xl text-5xl font-black leading-[1.03] tracking-[-0.055em] sm:text-6xl">告诉我哪天有空，<br />路线我来安排。</h1>
+            <p className="mt-5 max-w-xl text-lg leading-8 text-muted-foreground">一句话说清想法，AI 会结合当天天气与真实地点，给你几条走得顺的路线。</p>
+
+            {/* 自然语言主入口：放在左侧作为首要交互，与右侧表单形成分工 */}
+            <div className="mt-7 rounded-3xl border border-primary/30 bg-primary/5 p-5">
+              <div className="mb-3 flex items-center gap-1.5 text-sm font-bold text-primary">
+                <WandSparkles size={16} />一句话说清就行
+              </div>
+              <Textarea
+                aria-label="用一句话描述出行需求"
+                placeholder="例如：这周末想在静安区看看展览喝咖啡，尽量少花钱"
+                value={intentText}
+                maxLength={200}
+                rows={3}
+                className="resize-none bg-card text-base"
+                onChange={(event) => setIntentText(event.target.value)}
+                onKeyDown={(event) => {
+                  // Enter 直接解析，Shift+Enter 换行
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    void applyIntent();
+                  }
+                }}
+              />
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <Button
+                  disabled={parsing || intentText.trim().length < 2}
+                  onClick={() => void applyIntent()}
+                >
+                  <WandSparkles size={15} />{parsing ? '正在理解…' : '帮我填好条件'}
+                </Button>
+                <span className="text-xs text-muted-foreground">填好后在右侧核对，再生成路线</span>
+              </div>
+
+              {!intentText.trim() && (
+                <div className="mt-3">
+                  <div className="mb-1.5 text-xs text-muted-foreground">试试这样说</div>
+                  <div className="flex flex-col gap-1.5">
+                    {[
+                      '明天下午想在杨浦区逛书店和咖啡馆',
+                      '周末带朋友去杭州西湖区看展，预算宽松',
+                    ].map((sample) => (
+                      <button
+                        key={sample}
+                        onClick={() => setIntentText(sample)}
+                        className="w-fit rounded-full border bg-card px-3 py-1.5 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                      >{sample}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {intentSummary && (
+                <div className="mt-3 rounded-2xl bg-card p-3.5 text-sm">
+                  <div className="font-semibold text-primary">已填好：{intentSummary}</div>
+                  {intentAssumed.length > 0 && (
+                    <div className="mt-1.5 text-xs text-muted-foreground">
+                      以下按默认值处理，可在右侧修改：{intentAssumed.join('、')}
+                    </div>
+                  )}
+                  <div className="mt-1 text-xs text-muted-foreground">请核对右侧条件，确认后点「生成我的路线」</div>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-6 grid grid-cols-3 gap-3 text-sm"><div className="rounded-2xl border bg-card p-3"><b className="block text-xl">实时</b><span className="text-muted-foreground">高德天气</span></div><div className="rounded-2xl border bg-card p-3"><b className="block text-xl">真实</b><span className="text-muted-foreground">高德地点</span></div><div className="rounded-2xl border bg-card p-3"><b className="block text-xl">AI</b><span className="text-muted-foreground">路线生成</span></div></div>
           </div>
 
           <div className="relative rounded-[34px] border bg-card p-5 shadow-xl shadow-primary/10 sm:p-7">
             <div className="absolute -right-16 -top-16 h-44 w-44 rounded-full bg-accent/70 blur-3xl" />
             <div className="relative">
-              <div className="mb-6 flex items-center justify-between"><div><div className="text-xs font-bold uppercase tracking-[0.18em] text-primary">Plan your trip</div><h2 className="mt-1 text-2xl font-black">这次想去哪？</h2></div><CloudSun className="text-primary" size={30} /></div>
+              <div className="mb-6 flex items-center justify-between"><div><div className="text-xs font-bold uppercase tracking-[0.18em] text-primary">Plan your trip</div><h2 className="mt-1 text-2xl font-black">确认出行条件</h2></div><CloudSun className="text-primary" size={30} /></div>
 
-              {/* 自然语言入口：一句话说清需求，自动填好下方条件 */}
-              <div className="mb-5 rounded-2xl border border-primary/30 bg-primary/5 p-4">
-                <div className="mb-2 flex items-center gap-1.5 text-sm font-bold text-primary">
-                  <WandSparkles size={15} />一句话说清就行
-                </div>
-                <Textarea
-                  aria-label="用一句话描述出行需求"
-                  placeholder="例如：这周末想在静安区看看展览喝咖啡，尽量少花钱"
-                  value={intentText}
-                  maxLength={200}
-                  rows={2}
-                  className="resize-none bg-card"
-                  onChange={(event) => setIntentText(event.target.value)}
-                  onKeyDown={(event) => {
-                    // Enter 直接解析，Shift+Enter 换行
-                    if (event.key === 'Enter' && !event.shiftKey) {
-                      event.preventDefault();
-                      void applyIntent();
-                    }
-                  }}
-                />
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <Button
-                    size="sm"
-                    disabled={parsing || intentText.trim().length < 2}
-                    onClick={() => void applyIntent()}
-                  >
-                    {parsing ? '正在理解…' : '帮我填好条件'}
-                  </Button>
-                  {!intentText.trim() && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {[
-                        '明天下午想在杨浦区逛书店和咖啡馆',
-                        '周末带朋友去杭州西湖区看展，预算宽松',
-                      ].map((sample) => (
-                        <button
-                          key={sample}
-                          onClick={() => setIntentText(sample)}
-                          className="rounded-full border bg-card px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted"
-                        >{sample}</button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                {intentSummary && (
-                  <div className="mt-3 rounded-xl bg-card p-3 text-xs">
-                    <div className="font-semibold text-primary">已填好：{intentSummary}</div>
-                    {intentAssumed.length > 0 && (
-                      <div className="mt-1 text-muted-foreground">
-                        以下按默认值处理，可在下方修改：{intentAssumed.join('、')}
-                      </div>
-                    )}
-                    <div className="mt-1 text-muted-foreground">请核对下方条件，确认后点「生成我的路线」</div>
-                  </div>
-                )}
-              </div>
-
-              <div className="mb-4 flex items-center gap-3">
-                <span className="h-px flex-1 bg-border" />
-                <span className="text-xs text-muted-foreground">或手动填写</span>
-                <span className="h-px flex-1 bg-border" />
-              </div>
-
-              <div className="space-y-5">
+              <div className="space-y-4">
                 <div ref={cityBoxRef} className="relative">
                   <label className="mb-2 block text-sm font-bold" htmlFor="city-input">出发城市</label>
                   <div className="grid grid-cols-[1fr_auto] gap-2">
@@ -576,7 +578,7 @@ export default function HomePage() {
 
                 <div>
                   <span className="mb-2 block text-sm font-bold">消费取向</span>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                     {BUDGET_TIERS.map((tier) => (
                       <button
                         key={tier.key}
