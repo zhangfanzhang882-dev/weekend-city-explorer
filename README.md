@@ -48,7 +48,9 @@
 │   ├── _shared/                共享模块（下划线开头不会成为路由）
 │   │   ├── api.ts              响应封装、密钥调用、上游错误处理
 │   │   ├── geo.ts              距离计算、路线排序、顺路阈值
-│   │   └── opening.ts          营业时间交叉校验
+│   │   ├── opening.ts          营业时间交叉校验
+│   │   ├── lodging.ts          住宿搜索（周边 / 关键词）
+│   │   └── context.ts          节假日与空气质量（免密钥，静默降级）
 │   └── api/                    每个文件对应一个接口
 │       ├── intent.ts           POST /api/intent   自然语言 → 结构化条件
 │       ├── places.ts           GET  /api/places   城市 / 区域 / 地点搜索
@@ -96,9 +98,12 @@
 3. **AI 编排**：DeepSeek 从真实候选中选点，提示词内附方位与距中心距离
 4. **硬校验**：服务端按最近邻重排消除折返，拒绝单段 > 6km 或跨度 > 12km 的路线
 5. **兜底**：AI 路线全被拒时，改用地理聚类生成，保证不会失败
+6. **环境与住宿**：并行取节假日、空气质量；跨天行程按第一天最后一站坐标搜附近住宿。三者互不依赖，任一失败都不影响路线
 
 请求：`{ city, areas[], date, endDate, budgetTier, budgetHint, interests[], partySize }`
-响应：`{ weather, routes[], candidates[], verified, poiCount, sources[] }`
+响应：`{ weather, routes[], candidates[], verified, holiday, air, lodging[], isMultiDay, poiCount, sources[] }`
+
+> 关于为什么不接大众点评 / 携程：这些平台的开放接口只面向企业或代理商——美团要求营业执照、等保证明与保证金，去哪儿要求代理商资质，Booking 要求先成为 Affiliate Partner。个人开发者无法准入，因此改用高德已覆盖的住宿 POI 数据实现同等能力。
 
 ### `POST /api/intent` — 自然语言解析
 
@@ -108,7 +113,7 @@
 
 ### `GET /api/places` — 地点查询
 
-按 `mode` 分三种：`city`（城市搜索）、`area`（区县列表）、`poi`（地点搜索，用于换地点/加地点）。行政区数据缓存 1 天，POI 缓存 5 分钟。
+按 `mode` 分四种：`city`（城市搜索）、`area`（区县列表）、`poi`（地点搜索，用于换地点/加地点）、`lodging`（住宿搜索，传 `near` 坐标走周边、否则按关键词搜全城）。行政区缓存 1 天，POI 与住宿缓存 5 分钟。
 
 ### `GET/POST /api/trip` — 行程读写
 
@@ -177,6 +182,9 @@ git push origin main             # 约 90 秒后线上生效
 | 地点、评分、照片、营业时间、电话 | 高德 POI | 照片统一升级为 https，避免被浏览器拦截 |
 | 路线组合与文案 | DeepSeek | 只能从真实候选中选择，服务端逐个校验地点名 |
 | 站点间距离 | 本地 Haversine 计算 | **直线距离**，实测约为真实路程的 70%–85% |
+| 住宿推荐 | 高德住宿类 POI 周边搜索 | 跨天行程才出现，以当天最后一站为圆心 2.5km |
+| 节假日与调休 | timor.tech 公开接口 | 免密钥；用于提示假期拥挤度 |
+| 空气质量 | Open-Meteo Air Quality | 免密钥；预报窗口约 5–7 天，超出会降级为近期参考值 |
 | 历史点评 | 内置示例 | 界面上明确标注「示例数据」，不冒充真实用户评价 |
 | 打卡与路线评价 | 用户产生 | 存 KV |
 

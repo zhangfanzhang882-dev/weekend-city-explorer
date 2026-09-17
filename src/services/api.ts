@@ -25,6 +25,41 @@ export interface IVerifiedSummary {
   withRating: number;
 }
 
+/** 住宿推荐（高德住宿类 POI 周边搜索） */
+export interface ILodging {
+  id: string;
+  name: string;
+  type: string;
+  area: string;
+  address: string;
+  location: string;
+  /** 与当天最后一站的直线距离（米）；关键词搜索时为 null */
+  distanceM: number | null;
+  rating: number | null;
+  cost: number;
+  hasCostData: boolean;
+  tel: string;
+  photos: string[];
+  source: string[];
+}
+
+/** 节假日信息，用于提示拥挤度 */
+export interface IHolidayInfo {
+  isHoliday: boolean;
+  name: string;
+  isMakeupWorkday: boolean;
+  note: string;
+}
+
+/** 空气质量，用于辅助判断室内/户外 */
+export interface IAirInfo {
+  aqi: number | null;
+  pm25: number | null;
+  level: string;
+  preferIndoor: boolean;
+  note: string;
+}
+
 export interface IPlanResponse {
   weather: IWeatherResult;
   routes: IRoute[];
@@ -32,6 +67,15 @@ export interface IPlanResponse {
   /** 全部真实候选地点，供行程编辑时替换或追加 */
   candidates: IStop[];
   verified: IVerifiedSummary;
+  /** 节假日；接口不可用时为 null */
+  holiday: IHolidayInfo | null;
+  /** 空气质量；接口不可用时为 null */
+  air: IAirInfo | null;
+  /** 跨天行程的住宿推荐；单日行程为空数组 */
+  lodging: ILodging[];
+  /** 住宿搜索的锚点站名（当天最后一站） */
+  lodgingAnchorName: string;
+  isMultiDay: boolean;
   sources: string[];
 }
 
@@ -116,6 +160,24 @@ export async function searchPlaces(keyword: string, city: string): Promise<IStop
     if (!response.ok) return [];
     const payload = await response.json() as { pois?: IStop[] };
     return payload.pois ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 搜索住宿。
+ * 传 near（坐标）走周边搜索，保证离行程近；否则按关键词搜全城。
+ */
+export async function searchLodging(city: string, options: { near?: string; keyword?: string } = {}): Promise<ILodging[]> {
+  try {
+    const params = new URLSearchParams({ mode: 'lodging', city });
+    if (options.near) params.set('near', options.near);
+    if (options.keyword) params.set('q', options.keyword);
+    const response = await fetch(`/api/places?${params.toString()}`);
+    if (!response.ok) return [];
+    const payload = await response.json() as { lodging?: ILodging[] };
+    return payload.lodging ?? [];
   } catch {
     return [];
   }

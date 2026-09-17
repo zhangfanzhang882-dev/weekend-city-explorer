@@ -6,6 +6,8 @@ import {
   centerOf, haversineKm, MAX_LEG_KM, MAX_SPAN_KM, orderByProximity, parseLocation, routeGeometry,
 } from '../_shared/geo';
 import { checkOpening } from '../_shared/opening';
+import { fetchAirQuality, fetchHoliday } from '../_shared/context';
+import { findLodging } from '../_shared/lodging';
 
 interface PlanRequest {
   city: string;
@@ -312,7 +314,8 @@ function buildGeoRoutes(pois: Awaited<ReturnType<typeof getPois>>) {
   if (withPoint.length < 6) return [];
 
   const used = new Set<string>();
-  const routes: Array<Record<string, unknown>> = [];
+  // 与 AI 路线保持同一结构，便于调用方统一处理
+  const routes: Array<{ id: string; stops: Array<{ name: string; location: string }> } & Record<string, unknown>> = [];
 
   for (let index = 0; index < 3; index += 1) {
     const available = withPoint.filter((item) => !used.has(item.poi.name));
@@ -428,7 +431,37 @@ export async function onRequestPost(context: { request: Request; env: AppEnv }) 
       withPhotos: pois.filter((poi) => poi.photos.length > 0).length,
       withRating: pois.filter((poi) => poi.rating).length,
     };
-    return json({ weather, routes, poiCount: pois.length, candidates, verified, sources: ['高德地图', '高德天气', 'DeepSeek'] });
+
+    // 出行环境与住宿：三者互不依赖，并行请求；任一失败都不影响路线本身
+    const isMultiDay = request.endDate > request.date;
+    const cityCenter = centerOf(
+      pois.map((poi) => parseLocation(poi.location)).filter(Boolean) as Array<{ lng: number; lat: number }>,
+    );
+    // 跨天才需要住宿；以第一条路线的最后一站为中心，保证住得离行程近
+    const lodgingAnchor = isMultiDay ? routes[0]?.stops?.at(-1)?.location : undefined;
+
+    const [holiday, air, lodging] = await Promise.all([
+      fetchHoliday(request.date),
+      cityCenter ? fetchAirQuality(cityCenter.lng, cityCenter.lat, request.date) : Promise.resolve(null),
+      lodgingAnchor
+        ? findLodging(lodgingAnchor, context.env.AMAP_WEB_SERVICE_KEY).catch(() => [])
+        : Promise.resolve([]),
+    ]);
+
+    return json({
+      weather,
+      routes,
+      poiCount: pois.length,
+      candidates,
+      verified,
+      holiday,
+      air,
+      lodging,
+      lodgingAnchorName: lodgingAnchor ? routes[0]?.stops?.at(-1)?.name ?? '' : '',
+      isMultiDay,
+      // 按能力维度列出，而非单一供应商名
+      sources: ['真实天气', '真实地点', '节假日日历', '空气质量', 'AI 路线'],
+    });
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : '路线生成失败' }, 502);
   }

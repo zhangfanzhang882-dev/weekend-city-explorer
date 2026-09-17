@@ -1,4 +1,5 @@
 import { amapGet, json, safeText, type AppEnv } from '../_shared/api';
+import { findLodging, searchLodging } from '../_shared/lodging';
 
 interface DistrictNode {
   name?: string;
@@ -129,6 +130,16 @@ export async function onRequestGet(context: { request: Request; env: AppEnv }) {
       const city = keyword || '上海';
       const areas = await listAreas(city, context.env.AMAP_WEB_SERVICE_KEY);
       return json({ city, areas }, 200, 86400);
+    }
+
+    if (mode === 'lodging') {
+      const city = (url.searchParams.get('city') || '上海').trim().slice(0, 20);
+      const near = (url.searchParams.get('near') || '').trim();
+      // 有坐标走周边搜索（离行程近），否则按关键词搜全城
+      const list = near
+        ? await findLodging(near, context.env.AMAP_WEB_SERVICE_KEY)
+        : await searchLodging(keyword || '酒店', city, context.env.AMAP_WEB_SERVICE_KEY);
+      return json({ lodging: list }, 200, 300);
     }
 
     if (mode === 'poi') {

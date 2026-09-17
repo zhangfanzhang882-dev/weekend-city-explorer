@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CalendarDays, CloudSun, LocateFixed, MapPin, Plus, Search, Sparkles, Wand2, WandSparkles, X } from 'lucide-react';
+import { BedDouble, CalendarDays, CloudSun, LocateFixed, MapPin, Plus, Search, Sparkles, Star, Wand2, WandSparkles, Wind, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import JourneyPanel from '@/features/journey/JourneyPanel';
 import RouteCard from '@/features/journey/RouteCard';
-import { createAiPlan, fetchAreas, parseIntent, searchCities, type ICityOption, type IPlanResponse } from '@/services/api';
+import { createAiPlan, fetchAreas, parseIntent, searchCities, type ICityOption, type ILodging, type IPlanResponse } from '@/services/api';
 import type { IRoute } from '@/data/trips';
 
 type Screen = 'plan' | 'routes' | 'journey' | 'published';
@@ -65,6 +65,27 @@ function dayCount(start: string, end: string) {
   const to = new Date(`${end}T00:00:00`);
   const diff = Math.round((to.getTime() - from.getTime()) / 86400000);
   return diff >= 0 ? diff + 1 : 0;
+}
+
+/** 住宿缩略图：不用 lazy（小图且在首屏附近，lazy 会导致不触发加载），失败时降级为图标 */
+function LodgingThumb({ lodging }: { lodging: ILodging }) {
+  const [failed, setFailed] = useState(false);
+  const photo = lodging.photos?.[0];
+  if (!photo || failed) {
+    return (
+      <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+        <BedDouble size={16} />
+      </span>
+    );
+  }
+  return (
+    <img
+      src={photo}
+      alt={lodging.name}
+      onError={() => setFailed(true)}
+      className="h-12 w-12 shrink-0 rounded-lg bg-muted object-cover"
+    />
+  );
 }
 
 export default function HomePage() {
@@ -356,7 +377,7 @@ export default function HomePage() {
           <div>
             <div className="mb-5 inline-flex items-center gap-2 rounded-full bg-accent px-4 py-2 text-sm font-semibold text-accent-foreground"><Sparkles size={15} />先查真实天气与地点，再排路线</div>
             <h1 className="max-w-2xl text-5xl font-black leading-[1.03] tracking-[-0.055em] sm:text-6xl">告诉我哪天有空，<br />路线我来安排。</h1>
-            <p className="mt-5 max-w-xl text-lg leading-8 text-muted-foreground">一句话说清想法，AI 会结合当天天气与真实地点，给你几条走得顺的路线。</p>
+            <p className="mt-5 max-w-xl text-lg leading-8 text-muted-foreground">一句话说清想法，AI 会结合真实天气、地点、节假日与空气质量，给你几条走得顺的路线；跨天还会推荐住宿。</p>
 
             {/* 自然语言主入口：放在左侧作为首要交互，与右侧表单形成分工 */}
             <div className="mt-7 rounded-3xl border border-primary/30 bg-primary/5 p-5">
@@ -420,7 +441,20 @@ export default function HomePage() {
               )}
             </div>
 
-            <div className="mt-6 grid grid-cols-3 gap-3 text-sm"><div className="rounded-2xl border bg-card p-3"><b className="block text-xl">实时</b><span className="text-muted-foreground">高德天气</span></div><div className="rounded-2xl border bg-card p-3"><b className="block text-xl">真实</b><span className="text-muted-foreground">高德地点</span></div><div className="rounded-2xl border bg-card p-3"><b className="block text-xl">AI</b><span className="text-muted-foreground">路线生成</span></div></div>
+            <div className="mt-6 grid grid-cols-2 gap-2.5 text-sm sm:grid-cols-4">
+              {[
+                { icon: <CloudSun size={16} />, title: '真实天气', desc: '逐日预报' },
+                { icon: <MapPin size={16} />, title: '真实地点', desc: '评分与营业' },
+                { icon: <CalendarDays size={16} />, title: '节假日历', desc: '含调休补班' },
+                { icon: <BedDouble size={16} />, title: '住宿推荐', desc: '跨天可用' },
+              ].map((item) => (
+                <div key={item.title} className="rounded-2xl border bg-card p-3">
+                  <span className="flex items-center gap-1.5 text-primary">{item.icon}</span>
+                  <b className="mt-1.5 block text-base">{item.title}</b>
+                  <span className="text-xs text-muted-foreground">{item.desc}</span>
+                </div>
+              ))}
+            </div>
           </div>
 
           <div className="relative rounded-[34px] border bg-card p-5 shadow-xl shadow-primary/10 sm:p-7">
@@ -611,7 +645,7 @@ export default function HomePage() {
           <button className="mb-5 text-sm font-semibold text-muted-foreground hover:text-foreground" onClick={() => setScreen('plan')}>← 修改出行条件</button>
           <div className="mb-8 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
             <div>
-              <div className="text-xs font-bold uppercase tracking-[0.18em] text-primary">数据来源：{planResult.sources.join(' · ')}</div>
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-primary">已接入：{planResult.sources.join(' · ')}</div>
               <h2 className="mt-2 text-4xl font-black tracking-tight">为你排好了 {routes.length} 条路线</h2>
               <p className="mt-2 text-muted-foreground">{city} · {selectedAreas.length > 0 ? selectedAreas.join('、') : '不限区域'} · {startDate}{endDate !== startDate ? ` 至 ${endDate}` : ''} · 参考天气 {planResult.weather.date} {planResult.weather.condition} · {planResult.weather.tempLow}–{planResult.weather.tempHigh}℃</p>
               {planResult.weather.forecastStatus === 'out_of_range'
@@ -621,12 +655,69 @@ export default function HomePage() {
             <Badge variant="secondary" className="w-fit">{planResult.poiCount} 个真实地点候选</Badge>
           </div>
           {planResult.verified && (
-            <div className="mb-6 flex flex-wrap gap-x-5 gap-y-2 rounded-2xl border bg-card px-4 py-3 text-xs text-muted-foreground">
+            <div className="mb-4 flex flex-wrap gap-x-5 gap-y-2 rounded-2xl border bg-card px-4 py-3 text-xs text-muted-foreground">
               <span className="font-bold text-foreground">数据核验</span>
               <span>营业时间已确认 {planResult.verified.openConfirmed}/{planResult.verified.total}</span>
               <span>含实景照片 {planResult.verified.withPhotos}/{planResult.verified.total}</span>
               <span>含评分 {planResult.verified.withRating}/{planResult.verified.total}</span>
               {planResult.verified.openUnknown > 0 && <span className="text-warning">{planResult.verified.openUnknown} 个地点营业时间无数据，出发前请自行确认</span>}
+            </div>
+          )}
+
+          {/* 出行环境：节假日拥挤度与空气质量，来自日历与空气质量数据源 */}
+          {(planResult.holiday?.note || planResult.air?.note) && (
+            <div className="mb-6 flex flex-col gap-2">
+              {planResult.holiday?.note && (
+                <div className={`flex items-start gap-2 rounded-2xl px-4 py-2.5 text-sm ${planResult.holiday.isHoliday ? 'bg-warning/10 text-warning' : 'bg-secondary text-muted-foreground'}`}>
+                  <CalendarDays size={15} className="mt-0.5 shrink-0" />
+                  <span>{planResult.holiday.note}</span>
+                </div>
+              )}
+              {planResult.air?.note && (
+                <div className={`flex items-start gap-2 rounded-2xl px-4 py-2.5 text-sm ${planResult.air.preferIndoor ? 'bg-warning/10 text-warning' : 'bg-secondary text-muted-foreground'}`}>
+                  <Wind size={15} className="mt-0.5 shrink-0" />
+                  <span>{planResult.air.note}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 跨天行程的住宿推荐：按当天最后一站坐标搜周边，保证住得离行程近 */}
+          {planResult.isMultiDay && planResult.lodging.length > 0 && (
+            <div className="mb-6 rounded-2xl border bg-card p-4">
+              <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                <BedDouble size={16} className="text-primary" />
+                <span className="text-sm font-bold">当晚住哪儿</span>
+                <span className="text-xs text-muted-foreground">
+                  以「{planResult.lodgingAnchorName}」为中心 2.5 km 内
+                </span>
+              </div>
+              <p className="mb-3 text-xs text-muted-foreground">
+                行程跨 {dayCount(startDate, endDate)} 天，以下住宿离第一天最后一站较近；确认路线后可在行程页更换
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {planResult.lodging.slice(0, 4).map((item) => (
+                  <div key={item.id} className="flex items-center gap-3 rounded-xl border p-2.5">
+                    <LodgingThumb lodging={item} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-semibold" title={item.name}>{item.name}</div>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+                        {item.distanceM !== null && <span>{item.distanceM} m</span>}
+                        {item.rating ? <span className="flex items-center gap-0.5"><Star size={10} className="fill-warning text-warning" />{item.rating}</span> : null}
+                        <span>{item.hasCostData ? `约 ¥${item.cost}` : '价格暂无数据'}</span>
+                      </div>
+                    </div>
+                    {item.location && (
+                      <a
+                        href={`https://uri.amap.com/marker?position=${item.location}&name=${encodeURIComponent(item.name)}&src=weekend-city-explorer&coordinate=gaode`}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="shrink-0 rounded-lg border px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
+                      >地图</a>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           {/* 排序与自定义：默认方案之外给用户主动权 */}
