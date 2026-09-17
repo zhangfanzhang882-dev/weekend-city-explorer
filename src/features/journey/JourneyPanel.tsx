@@ -8,8 +8,8 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import RouteMap from '@/components/RouteMap';
-import { searchPlaces } from '@/api/plan';
+import RouteMap from '@/features/journey/RouteMap';
+import { searchPlaces } from '@/services/api';
 import { getSampleReviews } from '@/data/sampleReviews';
 import type { ICheckIn, IRoute, IStop } from '@/data/trips';
 

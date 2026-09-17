@@ -4,9 +4,9 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import JourneyPanel from '@/components/JourneyPanel';
-import RouteCard from '@/components/RouteCard';
-import { createAiPlan, fetchAreas, parseIntent, searchCities, type ICityOption, type IPlanResponse } from '@/api/plan';
+import JourneyPanel from '@/features/journey/JourneyPanel';
+import RouteCard from '@/features/journey/RouteCard';
+import { createAiPlan, fetchAreas, parseIntent, searchCities, type ICityOption, type IPlanResponse } from '@/services/api';
 import type { IRoute } from '@/data/trips';
 
 type Screen = 'plan' | 'routes' | 'journey' | 'published';

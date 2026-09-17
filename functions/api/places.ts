@@ -1,6 +1,4 @@
-interface Env {
-  AMAP_WEB_SERVICE_KEY: string;
-}
+import { amapGet, json, safeText, type AppEnv } from '../_shared/api';
 
 interface DistrictNode {
   name?: string;
@@ -8,34 +6,6 @@ interface DistrictNode {
   citycode?: string | string[];
   level?: string;
   districts?: DistrictNode[];
-}
-
-const json = (body: unknown, status = 200, maxAge = 86400) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      // 行政区与城市数据变动极少，长缓存可降低接口压力；POI 搜索结果缓存较短
-      'cache-control': `public, max-age=${maxAge}`,
-    },
-  });
-
-async function amapGet(path: string, params: Record<string, string>, key: string) {
-  const url = new URL(`https://restapi.amap.com${path}`);
-  Object.entries({ ...params, key }).forEach(([name, value]) => url.searchParams.set(name, value));
-  const response = await fetch(url.toString());
-  // 高德异常时可能返回 HTML，直接 .json() 会抛出难以理解的解析错误
-  const rawText = await response.text();
-  let data: Record<string, unknown>;
-  try {
-    data = JSON.parse(rawText) as Record<string, unknown>;
-  } catch {
-    throw new Error(`高德服务返回异常响应（HTTP ${response.status}），请稍后重试`);
-  }
-  if (!response.ok || data.status !== '1') {
-    throw new Error(`高德服务暂不可用：${String(data.info ?? response.status).slice(0, 80)}`);
-  }
-  return data;
 }
 
 /**
@@ -146,7 +116,7 @@ async function searchPois(keyword: string, city: string, key: string) {
   return results.slice(0, 12);
 }
 
-export async function onRequestGet(context: { request: Request; env: Env }) {
+export async function onRequestGet(context: { request: Request; env: AppEnv }) {
   try {
     if (!context.env.AMAP_WEB_SERVICE_KEY) {
       return json({ error: '服务端尚未配置高德密钥' }, 503);
@@ -158,7 +128,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     if (mode === 'area') {
       const city = keyword || '上海';
       const areas = await listAreas(city, context.env.AMAP_WEB_SERVICE_KEY);
-      return json({ city, areas });
+      return json({ city, areas }, 200, 86400);
     }
 
     if (mode === 'poi') {
@@ -169,9 +139,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       return json({ pois }, 200, 300);
     }
 
-    if (keyword.length < 1) return json({ cities: [] });
+    if (keyword.length < 1) return json({ cities: [] }, 200, 86400);
     const cities = await searchCities(keyword, context.env.AMAP_WEB_SERVICE_KEY);
-    return json({ cities });
+    return json({ cities }, 200, 86400);
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : '查询失败' }, 502, 0);
   }

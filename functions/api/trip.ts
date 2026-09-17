@@ -1,12 +1,4 @@
-/** KV 的最小接口定义，避免引入 @cloudflare/workers-types 依赖 */
-interface TripKV {
-  get(key: string): Promise<string | null>;
-  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
-}
-
-interface Env {
-  TRIPS?: TripKV;
-}
+import { json, type AppEnv } from '../_shared/api';
 
 interface TripPayload {
   /** 行程标题 */
@@ -31,14 +23,6 @@ interface TripPayload {
   updatedAt?: string;
 }
 
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
-    },
-  });
 
 /**
  * KV 未绑定时的内存兜底。
@@ -47,12 +31,12 @@ const json = (body: unknown, status = 200) =>
  */
 const memoryStore = new Map<string, string>();
 
-async function readTrip(env: Env, id: string) {
+async function readTrip(env: AppEnv, id: string) {
   if (env.TRIPS) return env.TRIPS.get(id);
   return memoryStore.get(id) ?? null;
 }
 
-async function writeTrip(env: Env, id: string, value: string) {
+async function writeTrip(env: AppEnv, id: string, value: string) {
   if (env.TRIPS) {
     // 行程数据 30 天后自动过期，避免无限堆积
     await env.TRIPS.put(id, value, { expirationTtl: 60 * 60 * 24 * 30 });
@@ -74,7 +58,7 @@ function newTripId() {
 const STAGES = ['planning', 'team', 'ongoing', 'done'] as const;
 
 /** 读取行程 */
-export async function onRequestGet(context: { request: Request; env: Env }) {
+export async function onRequestGet(context: { request: Request; env: AppEnv }) {
   const url = new URL(context.request.url);
   const id = (url.searchParams.get('id') || '').trim().slice(0, 24);
   if (!id) return json({ error: '缺少行程 ID' }, 400);
@@ -89,7 +73,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 }
 
 /** 创建或更新行程；带 id 为更新，不带则创建 */
-export async function onRequestPost(context: { request: Request; env: Env }) {
+export async function onRequestPost(context: { request: Request; env: AppEnv }) {
   try {
     const body = await context.request.json() as { id?: string; trip?: Partial<TripPayload> };
     const trip = body.trip;

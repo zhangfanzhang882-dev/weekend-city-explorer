@@ -1,9 +1,7 @@
-interface Env {
-  AMAP_WEB_SERVICE_KEY: string;
-  DEEPSEEK_API_KEY: string;
-  DEEPSEEK_BASE_URL?: string;
-  DEEPSEEK_MODEL?: string;
-}
+import {
+  amapGet, callDeepSeek, extractJsonObject, formatDate, isDateString, json, safeText,
+  type AppEnv,
+} from '../_shared/api';
 
 interface ParsedIntent {
   city: string;
@@ -16,31 +14,6 @@ interface ParsedIntent {
   summary: string;
   /** 未能从输入中识别、采用了默认值的字段 */
   assumed: string[];
-}
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
-  });
-
-const safeText = (value: unknown, max: number) => String(value ?? '').trim().slice(0, max);
-
-async function amapGet(path: string, params: Record<string, string>, key: string) {
-  const url = new URL(`https://restapi.amap.com${path}`);
-  Object.entries({ ...params, key }).forEach(([name, value]) => url.searchParams.set(name, value));
-  const response = await fetch(url.toString());
-  const rawText = await response.text();
-  let data: Record<string, unknown>;
-  try {
-    data = JSON.parse(rawText) as Record<string, unknown>;
-  } catch {
-    throw new Error(`高德服务返回异常响应（HTTP ${response.status}）`);
-  }
-  if (!response.ok || data.status !== '1') {
-    throw new Error(`高德服务暂不可用：${String(data.info ?? response.status).slice(0, 80)}`);
-  }
-  return data;
 }
 
 /** 校验城市是否真实存在，返回规范化名称；不存在则返回 null */
@@ -76,9 +49,6 @@ async function listAreas(city: string, key: string) {
 
 const BUDGET_LABELS = ['穷游党', '经济实惠', '舒适适中', '土豪随意'];
 
-const pad = (value: number) => String(value).padStart(2, '0');
-const formatDate = (date: Date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-
 /** 最近的周末区间，作为未指定日期时的默认值 */
 function defaultRange(today: Date) {
   const day = today.getDay();
@@ -90,7 +60,7 @@ function defaultRange(today: Date) {
   return { start: formatDate(start), end: formatDate(end) };
 }
 
-export async function onRequestPost(context: { request: Request; env: Env }) {
+export async function onRequestPost(context: { request: Request; env: AppEnv }) {
   try {
     if (!context.env.AMAP_WEB_SERVICE_KEY || !context.env.DEEPSEEK_API_KEY) {
       return json({ error: '服务端尚未配置高德或 AI 密钥' }, 503);
@@ -105,7 +75,6 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const range = defaultRange(today);
     const fallbackCity = safeText(body.defaultCity, 20) || '上海';
 
-    const baseUrl = (context.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '');
     const prompt = `把用户的一句话出行需求解析成结构化参数。今天是 ${todayStr}（周${'日一二三四五六'[today.getDay()]}）。
 
 用户输入：${text}
@@ -121,40 +90,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
 只返回JSON：{"city":"","areas":[],"date":"","endDate":"","interests":[],"budgetTier":"","summary":"","assumed":[]}`;
 
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${context.env.DEEPSEEK_API_KEY}` },
-      body: JSON.stringify({
-        model: context.env.DEEPSEEK_MODEL || 'deepseek-chat',
-        temperature: 0.2,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: '你是出行需求解析器。只输出JSON，不要解释。不要编造用户没提到的地名。' },
-          { role: 'user', content: prompt },
-        ],
-      }),
-    });
-
-    const rawText = await response.text();
-    let payload: { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } } = {};
-    let parseFailed = false;
-    try {
-      payload = JSON.parse(rawText);
-    } catch {
-      parseFailed = true;
-    }
-    if (!response.ok) {
-      const detail = safeText(payload.error?.message, 120)
-        || (parseFailed ? `上游返回异常响应（HTTP ${response.status}）` : String(response.status));
-      throw new Error(`AI 服务暂不可用：${detail}。请稍后重试。`);
-    }
-    if (parseFailed) throw new Error('AI 服务返回了非预期内容，请稍后重试。');
-
-    const content = payload.choices?.[0]?.message?.content || '';
-    const start = content.indexOf('{');
-    const end = content.lastIndexOf('}');
-    if (start < 0 || end <= start) throw new Error('未能理解这句话，请换个说法');
-    const draft = JSON.parse(content.slice(start, end + 1)) as Partial<ParsedIntent>;
+    const content = await callDeepSeek(context.env, [
+      { role: 'system', content: '你是出行需求解析器。只输出JSON，不要解释。不要编造用户没提到的地名。' },
+      { role: 'user', content: prompt },
+    ], 0.2);
+    const draft = extractJsonObject<Partial<ParsedIntent>>(content);
 
     const assumed = Array.isArray(draft.assumed)
       ? draft.assumed.map((item) => safeText(item, 8)).filter(Boolean).slice(0, 5)
@@ -177,9 +117,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     if (droppedAreas > 0) assumed.push('部分区域未识别');
 
     // 日期必须合法且不早于今天
-    const isDate = (value: unknown) => /^\d{4}-\d{2}-\d{2}$/.test(String(value));
-    let date = isDate(draft.date) && String(draft.date) >= todayStr ? String(draft.date) : range.start;
-    let endDate = isDate(draft.endDate) ? String(draft.endDate) : range.end;
+    let date = isDateString(draft.date) && String(draft.date) >= todayStr ? String(draft.date) : range.start;
+    let endDate = isDateString(draft.endDate) ? String(draft.endDate) : range.end;
     if (endDate < date) endDate = date;
     // 单次行程限制在 7 天内，避免天气与候选地点失去意义
     const span = (new Date(`${endDate}T00:00:00`).getTime() - new Date(`${date}T00:00:00`).getTime()) / 86400000;

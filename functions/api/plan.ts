@@ -1,9 +1,11 @@
-interface Env {
-  AMAP_WEB_SERVICE_KEY: string;
-  DEEPSEEK_API_KEY: string;
-  DEEPSEEK_BASE_URL?: string;
-  DEEPSEEK_MODEL?: string;
-}
+import {
+  amapGet, callDeepSeek, extractJsonObject, formatDate, isDateString, json, safeText,
+  type AppEnv,
+} from '../_shared/api';
+import {
+  centerOf, haversineKm, MAX_LEG_KM, MAX_SPAN_KM, orderByProximity, parseLocation, routeGeometry,
+} from '../_shared/geo';
+import { checkOpening } from '../_shared/opening';
 
 interface PlanRequest {
   city: string;
@@ -35,156 +37,12 @@ interface AmapPoi {
   biz_ext?: { rating?: string; cost?: string; opentime2?: string | string[] };
 }
 
-const WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-
-/**
- * 交叉校验营业时间。
- * 高德 opentime2 覆盖率约 19/20，包含"周二全天不开放"这类关键信息。
- * 例如上海自然博物馆周二闭馆，不校验就会把它排进周二行程，用户白跑一趟。
- */
-function checkOpening(opentime: string | string[] | undefined, date: string) {
-  const text = Array.isArray(opentime) ? opentime.join('') : (opentime || '');
-  if (!text) return { status: 'unknown' as const, note: '营业时间暂无数据' };
-
-  const parsed = new Date(`${date}T00:00:00`);
-  if (Number.isNaN(parsed.getTime())) return { status: 'unknown' as const, note: '营业时间暂无数据' };
-  const weekday = WEEKDAY_NAMES[parsed.getDay()];
-  const order = ['一', '二', '三', '四', '五', '六', '日'];
-  const currentIndex = order.indexOf(weekday.replace('周', ''));
-
-  for (const segment of text.split(/[；;]/).map((item) => item.trim()).filter(Boolean)) {
-    if (!/不开放|休馆|闭馆|停止营业/.test(segment)) continue;
-    let covers = segment.includes(weekday);
-    if (!covers) {
-      const range = segment.match(/周([一二三四五六日])\s*[-–至]\s*周([一二三四五六日])/);
-      if (range) {
-        const from = order.indexOf(range[1]);
-        const to = order.indexOf(range[2]);
-        covers = from >= 0 && to >= 0 && currentIndex >= from && currentIndex <= to;
-      }
-    }
-    if (covers) return { status: 'closed' as const, note: `${weekday}不开放` };
-  }
-  return { status: 'open' as const, note: text.slice(0, 60) };
-}
-
-/** 解析高德 "lng,lat" 字符串 */
-function parseLocation(location: string) {
-  const [lng, lat] = location.split(',').map(Number);
-  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
-  return { lng, lat };
-}
-
-/**
- * 两点直线距离（公里，Haversine）。
- * 实测直线与高德真实路径比值约 1.17–1.43，足以判断"一个在东一个在西"，
- * 且无需额外接口调用。
- */
-function haversineKm(a: { lng: number; lat: number }, b: { lng: number; lat: number }) {
-  const toRad = (value: number) => (value * Math.PI) / 180;
-  const dLat = toRad(b.lat - a.lat);
-  const dLng = toRad(b.lng - a.lng);
-  const h = Math.sin(dLat / 2) ** 2
-    + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
-  return 6371 * 2 * Math.asin(Math.sqrt(h));
-}
-
-/** 路线地理指标：相邻站点间距、总里程、最远两点跨度 */
-function routeGeometry(stops: Array<{ location: string }>) {
-  const points = stops.map((stop) => parseLocation(stop.location)).filter(Boolean) as Array<{ lng: number; lat: number }>;
-  if (points.length < 2) return { legs: [] as number[], totalKm: 0, maxLegKm: 0, spanKm: 0, measured: false };
-  const legs: number[] = [];
-  for (let i = 1; i < points.length; i += 1) legs.push(haversineKm(points[i - 1], points[i]));
-  let spanKm = 0;
-  for (let i = 0; i < points.length; i += 1) {
-    for (let j = i + 1; j < points.length; j += 1) spanKm = Math.max(spanKm, haversineKm(points[i], points[j]));
-  }
-  return {
-    legs,
-    totalKm: legs.reduce((sum, value) => sum + value, 0),
-    maxLegKm: Math.max(...legs),
-    spanKm,
-    measured: points.length === stops.length,
-  };
-}
-
-/** 单段可接受上限（公里），超过视为不顺路 */
-const MAX_LEG_KM = 6;
-/** 一日路线总跨度上限（公里） */
-const MAX_SPAN_KM = 12;
-
-/**
- * 按最近邻重排站点，消除折返。
- * AI 给的顺序常是随意的（西→东→西），重排后总里程显著下降。
- * 枚举每个起点取总里程最短者；3 个点规模极小，开销可忽略。
- */
-function orderByProximity<T extends { location: string }>(stops: T[]): T[] {
-  const points = stops.map((stop) => parseLocation(stop.location));
-  if (points.some((point) => !point)) return stops;
-  const coords = points as Array<{ lng: number; lat: number }>;
-  let best = stops;
-  let bestTotal = Infinity;
-  for (let start = 0; start < stops.length; start += 1) {
-    const remaining = stops.map((_, index) => index).filter((index) => index !== start);
-    const order = [start];
-    let total = 0;
-    let current = start;
-    while (remaining.length > 0) {
-      let nearest = 0;
-      let nearestKm = Infinity;
-      remaining.forEach((index, position) => {
-        const km = haversineKm(coords[current], coords[index]);
-        if (km < nearestKm) {
-          nearestKm = km;
-          nearest = position;
-        }
-      });
-      total += nearestKm;
-      current = remaining[nearest];
-      order.push(current);
-      remaining.splice(nearest, 1);
-    }
-    if (total < bestTotal) {
-      bestTotal = total;
-      best = order.map((index) => stops[index]);
-    }
-  }
-  return best;
-}
-
 interface RouteDraft {
   title: string;
   subtitle: string;
   accent: string;
   weatherFit: string;
   stopNames: string[];
-}
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8' },
-  });
-
-const safeText = (value: unknown, max: number) =>
-  String(value ?? '').trim().slice(0, max);
-
-async function amapGet(path: string, params: Record<string, string>, key: string) {
-  const url = new URL(`https://restapi.amap.com${path}`);
-  Object.entries({ ...params, key }).forEach(([name, value]) => url.searchParams.set(name, value));
-  const response = await fetch(url.toString());
-  // 高德异常时可能返回 HTML 或空响应，直接 .json() 会抛出难以理解的解析错误
-  const rawText = await response.text();
-  let data: Record<string, unknown>;
-  try {
-    data = JSON.parse(rawText) as Record<string, unknown>;
-  } catch {
-    throw new Error(`高德服务返回异常响应（HTTP ${response.status}），请稍后重试`);
-  }
-  if (!response.ok || data.status !== '1') {
-    throw new Error(`高德服务暂不可用：${safeText(data.info, 80) || response.status}`);
-  }
-  return data;
 }
 
 async function getCityAdcode(city: string, key: string) {
@@ -349,16 +207,7 @@ async function getPois(request: PlanRequest, key: string) {
   return usable.slice(0, 20);
 }
 
-function parseJsonObject(raw: string) {
-  const cleaned = raw.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error('AI 未返回有效路线结构');
-  return JSON.parse(cleaned.slice(start, end + 1)) as { routes?: RouteDraft[] };
-}
-
-async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awaited<ReturnType<typeof getPois>>, env: Env) {
-  const baseUrl = (env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '');
+async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awaited<ReturnType<typeof getPois>>, env: AppEnv) {
 
   // 候选点几何中心，用于给模型提供可读的相对方位
   const center = (() => {
@@ -383,43 +232,11 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
   });
 
   const prompt = `你是周末城市路线规划师。请严格从候选地点中选择，不得创造新地点或修改地点名称。\n\n用户条件：${JSON.stringify(request)}\n天气：${JSON.stringify(weather)}\n候选地点：${JSON.stringify(poisForPrompt)}\n\n生成3条差异明显的一日路线，每条选3个不同地点。\n\n【地理顺路是硬性要求】每个候选地点带 bearing（相对方位）与 kmFromCenter（距中心公里数）。同一条路线内的地点必须彼此靠近、方位一致，相邻两点距离不得超过 ${MAX_LEG_KM} 公里，整条路线跨度不得超过 ${MAX_SPAN_KM} 公里。绝对不要把城市东边和西边的地点放进同一条路线。三条路线之间应通过不同区域或不同主题体现差异。\n\n【消费取向】用户选择的档位是「${request.budgetTier}」，含义是：${request.budgetHint}。请据此挑选地点类型，但不要在任何字段里编造门票价格或人均花费——多数候选地点没有价格数据，价格因城市与场馆差异很大。\n\n候选地点还带 openNote 字段（真实营业时间）。请避免把营业时段明显冲突的地点排进同一条路线。\n\n字段要求：\n- accent：该路线的主题标签，4到6个汉字，例如“室内避雨”“城市漫步”，不要填颜色值或色号。\n- weatherFit：用不超过20个汉字说明这条路线为什么适合当天天气，只描述天气与场地的关系，不要复述日期或预报范围。\n\n只返回JSON：{"routes":[{"title":"","subtitle":"","accent":"","weatherFit":"","stopNames":["候选地点原名"]}]}`;
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: env.DEEPSEEK_MODEL || 'deepseek-chat',
-      temperature: 0.35,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: '只根据给定真实数据规划路线。禁止编造地点、价格、开放时间或平台评价。' },
-        { role: 'user', content: prompt },
-      ],
-    }),
-  });
-  // 上游可能返回 HTML 错误页（如 Cloudflare 520、网关超时），
-  // 直接 .json() 会抛出 "Unexpected token 'e'" 这类对用户无意义的原始错误，
-  // 因此先取文本再尝试解析，并把非 JSON 响应转成可读提示。
-  const rawText = await response.text();
-  let payload: { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } } = {};
-  let parseFailed = false;
-  try {
-    payload = JSON.parse(rawText);
-  } catch {
-    parseFailed = true;
-  }
-
-  if (!response.ok) {
-    const detail = safeText(payload.error?.message, 120)
-      || (parseFailed ? `上游返回异常响应（HTTP ${response.status}）` : String(response.status));
-    throw new Error(`AI 服务暂不可用：${detail}。请稍后重试。`);
-  }
-  if (parseFailed) {
-    throw new Error('AI 服务返回了非预期内容，请稍后重试。');
-  }
-  const drafts = parseJsonObject(payload.choices?.[0]?.message?.content || '').routes ?? [];
+  const content = await callDeepSeek(env, [
+    { role: 'system', content: '只根据给定真实数据规划路线。禁止编造地点、价格、开放时间或平台评价。' },
+    { role: 'user', content: prompt },
+  ]);
+  const drafts = extractJsonObject<{ routes?: RouteDraft[] }>(content).routes ?? [];
   const poiMap = new Map(pois.map((poi) => [poi.name, poi]));
   // AI 偶尔会把色号填进 accent、把日期范围复述进 weatherFit，这里做服务端兜底清洗。
   const cleanAccent = (value: unknown) => {
@@ -550,7 +367,7 @@ function buildGeoRoutes(pois: Awaited<ReturnType<typeof getPois>>) {
   return routes;
 }
 
-export async function onRequestPost(context: { request: Request; env: Env }) {
+export async function onRequestPost(context: { request: Request; env: AppEnv }) {
   try {
     if (!context.env.AMAP_WEB_SERVICE_KEY || !context.env.DEEPSEEK_API_KEY) {
       return json({ error: '服务端尚未配置高德或 AI 密钥' }, 503);
