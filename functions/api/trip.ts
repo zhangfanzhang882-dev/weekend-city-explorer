@@ -18,6 +18,13 @@ interface TripPayload {
   members?: unknown[];
   /** 费用约定，用户自由编辑 */
   costRule?: string;
+  /** 路线整体评价：总分、分项、感受、是否推荐 */
+  routeReview?: {
+    rating?: number;
+    aspects?: Record<string, number>;
+    comment?: string;
+    recommend?: boolean | null;
+  } | null;
   city?: string;
   date?: string;
   endDate?: string;
@@ -100,6 +107,18 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       checkIns: Array.isArray(trip.checkIns) ? trip.checkIns.slice(0, 100) : [],
       members: Array.isArray(trip.members) ? trip.members.slice(0, 20) : [],
       costRule: String(trip.costRule ?? '').slice(0, 120),
+      routeReview: trip.routeReview && Number(trip.routeReview.rating) > 0
+        ? {
+          rating: Math.min(Math.max(Math.round(Number(trip.routeReview.rating) || 0), 1), 5),
+          aspects: Object.fromEntries(
+            Object.entries(trip.routeReview.aspects ?? {})
+              .slice(0, 6)
+              .map(([key, value]) => [String(key).slice(0, 16), Math.min(Math.max(Math.round(Number(value) || 0), 0), 5)]),
+          ),
+          comment: String(trip.routeReview.comment ?? '').slice(0, 300),
+          recommend: typeof trip.routeReview.recommend === 'boolean' ? trip.routeReview.recommend : null,
+        }
+        : null,
       city: String(trip.city ?? '').slice(0, 20),
       date: String(trip.date ?? '').slice(0, 10),
       endDate: String(trip.endDate ?? '').slice(0, 10),

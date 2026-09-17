@@ -23,6 +23,16 @@ const STAGE_META: Array<{ key: Stage; label: string; hint: string }> = [
   { key: 'done', label: '发布路线', hint: '按实际走过的路线生成攻略并分享' },
 ];
 
+/**
+ * 路线整体评价的分项维度。
+ * 与单个地点的打卡评分区分：这里评的是路线设计本身好不好走、值不值得推荐。
+ */
+const ROUTE_ASPECTS = [
+  { key: 'smooth', label: '顺路程度', hint: '地点之间好走吗' },
+  { key: 'pace', label: '节奏松紧', hint: '时间安排合适吗' },
+  { key: 'worth', label: '值得程度', hint: '整体值不值得来' },
+] as const;
+
 /** 常用费用约定预设，一键填入后仍可自由改写 */
 const COST_PRESETS = ['各付各的', '门票自付，交通均摊', '全程 AA', '我请客'];
 
@@ -120,6 +130,12 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
   const [memberInput, setMemberInput] = useState('');
   // 费用约定可自由编辑，默认给一个常见方案
   const [costRule, setCostRule] = useState('门票自付，交通均摊');
+  // 路线整体评价：在结束行程时填写，趁记忆新鲜
+  const [finishOpen, setFinishOpen] = useState(false);
+  const [routeRating, setRouteRating] = useState(0);
+  const [aspectScores, setAspectScores] = useState<Record<string, number>>({});
+  const [routeComment, setRouteComment] = useState('');
+  const [recommend, setRecommend] = useState<boolean | null>(null);
   const [activeStop, setActiveStop] = useState<IStop | null>(null);
   const [draftRating, setDraftRating] = useState(0);
   const [draftText, setDraftText] = useState('');
@@ -213,7 +229,21 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           id: tripId || undefined,
-          trip: { title: route.title, stage: nextStage, stops, checkIns, members, costRule, city, date, endDate },
+          trip: {
+            title: route.title,
+            stage: nextStage,
+            stops,
+            checkIns,
+            members,
+            costRule,
+            // 路线整体评价，仅在结束时填写
+            routeReview: routeRating > 0
+              ? { rating: routeRating, aspects: aspectScores, comment: routeComment.trim(), recommend }
+              : null,
+            city,
+            date,
+            endDate,
+          },
         }),
       });
       const rawText = await response.text();
@@ -305,7 +335,17 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
       <div className="mb-6"><RouteMap stops={stopsWithDistance} activeId={activeStop?.id} /></div>
 
       {stage === 'done' ? (
-        <PublishedView route={route} visited={visited} checkIns={checkIns} members={members} costRule={costRule} totalKm={totalKm} tripId={tripId} onRestart={onBack} />
+        <PublishedView
+          route={route}
+          visited={visited}
+          checkIns={checkIns}
+          members={members}
+          costRule={costRule}
+          totalKm={totalKm}
+          tripId={tripId}
+          routeReview={routeRating > 0 ? { rating: routeRating, aspects: aspectScores, comment: routeComment.trim(), recommend } : null}
+          onRestart={onBack}
+        />
       ) : (
         <>
           <div className="grid gap-4">
@@ -524,14 +564,108 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
                 </>
               )}
               {stage === 'ongoing' && (
-                <Button disabled={saving || visited.length === 0} onClick={() => void persist('done')}>
-                  {saving ? '保存中…' : visited.length === 0 ? '至少打卡一个地点' : '结束行程，发布路线'}<Flag size={16} />
+                <Button disabled={saving || visited.length === 0} onClick={() => setFinishOpen(true)}>
+                  {visited.length === 0 ? '至少打卡一个地点' : '结束行程，写总评'}<Flag size={16} />
                 </Button>
               )}
             </div>
           </div>
         </>
       )}
+
+      {/* 结束行程：先写整条路线的总评，趁记忆新鲜 */}
+      <Dialog open={finishOpen && stage === 'ongoing'} onOpenChange={(open) => !open && setFinishOpen(false)}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto rounded-3xl">
+          <DialogHeader>
+            <DialogTitle>这条路线走下来怎么样？</DialogTitle>
+            <DialogDescription>
+              评价整条路线的安排，会和你的打卡一起出现在发布的攻略里。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-5 py-1">
+            <div>
+              <div className="mb-1.5 text-sm font-semibold">整体评分</div>
+              <StarPicker value={routeRating} onChange={setRouteRating} />
+            </div>
+
+            <div className="space-y-2.5">
+              <div className="text-sm font-semibold">分项评价<span className="ml-1 text-xs font-normal text-muted-foreground">可跳过</span></div>
+              {ROUTE_ASPECTS.map((aspect) => (
+                <div key={aspect.key} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-muted/50 px-3 py-2">
+                  <span className="text-sm">
+                    {aspect.label}
+                    <span className="ml-1.5 text-xs text-muted-foreground">{aspect.hint}</span>
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {[1, 2, 3, 4, 5].map((score) => (
+                      <button
+                        key={score}
+                        type="button"
+                        aria-label={`${aspect.label} ${score} 星`}
+                        onClick={() => setAspectScores((prev) => ({ ...prev, [aspect.key]: score }))}
+                        className="p-0.5"
+                      >
+                        <Star size={15} className={score <= (aspectScores[aspect.key] ?? 0) ? 'fill-warning text-warning' : 'text-muted-foreground/40'} />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div>
+              <div className="mb-1.5 text-sm font-semibold">会推荐给朋友吗</div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setRecommend(true)}
+                  aria-pressed={recommend === true}
+                  className={`flex-1 rounded-xl border px-3 py-2 text-sm transition ${recommend === true ? 'border-primary bg-primary text-primary-foreground font-semibold' : 'bg-card hover:bg-muted'}`}
+                >会推荐</button>
+                <button
+                  onClick={() => setRecommend(false)}
+                  aria-pressed={recommend === false}
+                  className={`flex-1 rounded-xl border px-3 py-2 text-sm transition ${recommend === false ? 'border-destructive bg-destructive/10 text-destructive font-semibold' : 'bg-card hover:bg-muted'}`}
+                >算了吧</button>
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-1.5 text-sm font-semibold">
+                总体感受<span className="ml-1 text-xs font-normal text-muted-foreground">选填</span>
+              </div>
+              <Textarea
+                aria-label="路线总体感受"
+                placeholder="这条路线的顺序合理吗？哪段最值得？有什么要提醒后来的人？"
+                value={routeComment}
+                maxLength={300}
+                rows={4}
+                className="resize-none"
+                onChange={(event) => setRouteComment(event.target.value)}
+              />
+              <div className="mt-1 text-right text-xs text-muted-foreground">{routeComment.length}/300</div>
+            </div>
+
+            {saveError && <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{saveError}</div>}
+
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button
+                variant="outline"
+                className="sm:flex-1"
+                disabled={saving}
+                onClick={() => { setFinishOpen(false); void persist('done'); }}
+              >跳过，直接发布</Button>
+              <Button
+                className="sm:flex-[2]"
+                disabled={saving || routeRating === 0}
+                onClick={() => { setFinishOpen(false); void persist('done'); }}
+              >
+                <Flag size={16} />{saving ? '发布中…' : routeRating === 0 ? '请先给整体评分' : '提交评价并发布'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* 打卡弹窗：仅进行中阶段可用，避免其他阶段残留空标题弹窗 */}
       <Dialog open={Boolean(activeStop) && stage === 'ongoing'} onOpenChange={(open) => !open && setActiveStop(null)}>
@@ -625,13 +759,14 @@ function PlaceOption({ stop, onPick }: { stop: IStop; onPick: () => void }) {
 }
 
 /** 已完成：按实际走过的地点生成攻略 */
-function PublishedView({ route, visited, checkIns, members, costRule, totalKm, tripId, onRestart }: {
+function PublishedView({ route, visited, checkIns, members, costRule, totalKm, tripId, routeReview, onRestart }: {
   route: IRoute;
   visited: IStop[];
   checkIns: ICheckIn[];
   members: string[];
   costRule: string;
   totalKm: number;
+  routeReview: { rating: number; aspects: Record<string, number>; comment: string; recommend: boolean | null } | null;
   tripId: string;
   onRestart: () => void;
 }) {
@@ -652,8 +787,47 @@ function PublishedView({ route, visited, checkIns, members, costRule, totalKm, t
           <div className="rounded-2xl bg-secondary p-3"><div className="text-xl font-black">{visited.length}</div><div className="text-xs text-muted-foreground">实际打卡</div></div>
           <div className="rounded-2xl bg-secondary p-3"><div className="text-xl font-black">{totalKm.toFixed(1)}</div><div className="text-xs text-muted-foreground">全程 km</div></div>
           <div className="rounded-2xl bg-secondary p-3"><div className="text-xl font-black">{members.length + 1}</div><div className="text-xs text-muted-foreground">同行人数</div></div>
-          <div className="rounded-2xl bg-secondary p-3"><div className="text-xl font-black">{avgRating ?? '—'}</div><div className="text-xs text-muted-foreground">我的均分</div></div>
+          <div className="rounded-2xl bg-secondary p-3"><div className="text-xl font-black">{avgRating ?? '—'}</div><div className="text-xs text-muted-foreground">地点均分</div></div>
         </div>
+
+        {/* 路线综合评价：整条路线的整体结论，与下方单点打卡区分 */}
+        {routeReview && (
+          <div className="mt-5 rounded-2xl border border-primary/30 bg-primary/5 p-4">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+              <span className="text-sm font-bold">路线综合评价</span>
+              <span className="flex items-center gap-0.5">
+                {[1, 2, 3, 4, 5].map((score) => (
+                  <Star key={score} size={14} className={score <= routeReview.rating ? 'fill-warning text-warning' : 'text-muted-foreground/40'} />
+                ))}
+              </span>
+              <span className="text-sm font-bold text-primary">{routeReview.rating}.0</span>
+              {routeReview.recommend !== null && (
+                <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${routeReview.recommend ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>
+                  {routeReview.recommend ? '会推荐给朋友' : '不太推荐'}
+                </span>
+              )}
+            </div>
+
+            {ROUTE_ASPECTS.some((aspect) => routeReview.aspects[aspect.key]) && (
+              <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5">
+                {ROUTE_ASPECTS.filter((aspect) => routeReview.aspects[aspect.key]).map((aspect) => (
+                  <span key={aspect.key} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    {aspect.label}
+                    <span className="flex items-center gap-0.5">
+                      {[1, 2, 3, 4, 5].map((score) => (
+                        <Star key={score} size={10} className={score <= routeReview.aspects[aspect.key] ? 'fill-warning text-warning' : 'text-muted-foreground/30'} />
+                      ))}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {routeReview.comment && (
+              <p className="mt-3 whitespace-pre-wrap border-t border-primary/15 pt-3 text-sm leading-6">{routeReview.comment}</p>
+            )}
+          </div>
+        )}
 
         {costRule.trim() && (
           <div className="mt-5 flex items-start gap-2 rounded-2xl bg-secondary p-3.5 text-sm">
