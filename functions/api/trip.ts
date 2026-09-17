@@ -16,6 +16,8 @@ interface TripPayload {
   stops: unknown[];
   checkIns?: unknown[];
   members?: unknown[];
+  /** 费用约定，用户自由编辑 */
+  costRule?: string;
   city?: string;
   date?: string;
   endDate?: string;
@@ -97,6 +99,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       stops: trip.stops.slice(0, 12),
       checkIns: Array.isArray(trip.checkIns) ? trip.checkIns.slice(0, 100) : [],
       members: Array.isArray(trip.members) ? trip.members.slice(0, 20) : [],
+      costRule: String(trip.costRule ?? '').slice(0, 120),
       city: String(trip.city ?? '').slice(0, 20),
       date: String(trip.date ?? '').slice(0, 10),
       endDate: String(trip.endDate ?? '').slice(0, 10),

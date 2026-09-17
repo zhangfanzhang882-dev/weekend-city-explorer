@@ -23,6 +23,9 @@ const STAGE_META: Array<{ key: Stage; label: string; hint: string }> = [
   { key: 'done', label: '发布路线', hint: '按实际走过的路线生成攻略并分享' },
 ];
 
+/** 常用费用约定预设，一键填入后仍可自由改写 */
+const COST_PRESETS = ['各付各的', '门票自付，交通均摊', '全程 AA', '我请客'];
+
 interface JourneyPanelProps {
   route: IRoute;
   onBack: () => void;
@@ -115,6 +118,8 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
   const [checkIns, setCheckIns] = useState<ICheckIn[]>([]);
   const [members, setMembers] = useState<string[]>([]);
   const [memberInput, setMemberInput] = useState('');
+  // 费用约定可自由编辑，默认给一个常见方案
+  const [costRule, setCostRule] = useState('门票自付，交通均摊');
   const [activeStop, setActiveStop] = useState<IStop | null>(null);
   const [draftRating, setDraftRating] = useState(0);
   const [draftText, setDraftText] = useState('');
@@ -208,7 +213,7 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           id: tripId || undefined,
-          trip: { title: route.title, stage: nextStage, stops, checkIns, members, city, date, endDate },
+          trip: { title: route.title, stage: nextStage, stops, checkIns, members, costRule, city, date, endDate },
         }),
       });
       const rawText = await response.text();
@@ -300,7 +305,7 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
       <div className="mb-6"><RouteMap stops={stopsWithDistance} activeId={activeStop?.id} /></div>
 
       {stage === 'done' ? (
-        <PublishedView route={route} visited={visited} checkIns={checkIns} members={members} totalKm={totalKm} tripId={tripId} onRestart={onBack} />
+        <PublishedView route={route} visited={visited} checkIns={checkIns} members={members} costRule={costRule} totalKm={totalKm} tripId={tripId} onRestart={onBack} />
       ) : (
         <>
           <div className="grid gap-4">
@@ -465,8 +470,30 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
                     </span>
                   ))}
                 </div>
-                <div className="mt-4 flex items-center gap-2 rounded-xl border p-3 text-sm">
-                  <CircleDollarSign size={17} className="shrink-0 text-primary" />餐饮与门票各自支付，交通费用均摊
+                <div className="mt-4">
+                  <label className="mb-2 flex items-center gap-1.5 text-sm font-semibold" htmlFor="cost-rule">
+                    <CircleDollarSign size={15} className="text-primary" />费用约定
+                  </label>
+                  <Textarea
+                    id="cost-rule"
+                    aria-label="费用约定"
+                    placeholder="写清怎么分摊，例如：门票各自买，打车和晚饭 AA"
+                    value={costRule}
+                    maxLength={120}
+                    rows={2}
+                    className="resize-none"
+                    onChange={(event) => setCostRule(event.target.value)}
+                  />
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    {COST_PRESETS.map((preset) => (
+                      <button
+                        key={preset}
+                        onClick={() => setCostRule(preset)}
+                        className={`rounded-full border px-2.5 py-1 text-xs transition ${costRule === preset ? 'border-primary bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-muted'}`}
+                      >{preset}</button>
+                    ))}
+                    <span className="ml-auto text-[11px] text-muted-foreground">{costRule.length}/120</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -598,11 +625,12 @@ function PlaceOption({ stop, onPick }: { stop: IStop; onPick: () => void }) {
 }
 
 /** 已完成：按实际走过的地点生成攻略 */
-function PublishedView({ route, visited, checkIns, members, totalKm, tripId, onRestart }: {
+function PublishedView({ route, visited, checkIns, members, costRule, totalKm, tripId, onRestart }: {
   route: IRoute;
   visited: IStop[];
   checkIns: ICheckIn[];
   members: string[];
+  costRule: string;
   totalKm: number;
   tripId: string;
   onRestart: () => void;
@@ -626,6 +654,13 @@ function PublishedView({ route, visited, checkIns, members, totalKm, tripId, onR
           <div className="rounded-2xl bg-secondary p-3"><div className="text-xl font-black">{members.length + 1}</div><div className="text-xs text-muted-foreground">同行人数</div></div>
           <div className="rounded-2xl bg-secondary p-3"><div className="text-xl font-black">{avgRating ?? '—'}</div><div className="text-xs text-muted-foreground">我的均分</div></div>
         </div>
+
+        {costRule.trim() && (
+          <div className="mt-5 flex items-start gap-2 rounded-2xl bg-secondary p-3.5 text-sm">
+            <CircleDollarSign size={16} className="mt-0.5 shrink-0 text-primary" />
+            <span><span className="font-semibold">费用约定：</span>{costRule}</span>
+          </div>
+        )}
 
         <div className="mt-6 space-y-3">
           {visited.map((stop, index) => {
