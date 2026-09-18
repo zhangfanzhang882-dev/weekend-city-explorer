@@ -69,9 +69,30 @@ export async function amapGet(path: string, params: Record<string, string>, key:
 export function extractJsonObject<T>(raw: string): T {
   const cleaned = raw.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
   const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error('AI 未返回有效的结构化内容');
-  return JSON.parse(cleaned.slice(start, end + 1)) as T;
+  if (start < 0) throw new Error('AI 未返回有效的结构化内容');
+
+  const body = cleaned.slice(start);
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    // 模型偶尔会漏掉结尾的 ] 或 }（尤其输出较长时）。
+    // 扫描括号深度，把缺失的闭合补齐后再解析，避免整条请求因此失败。
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    const stack: string[] = [];
+    for (const char of body) {
+      if (escaped) { escaped = false; continue; }
+      if (char === '\\') { escaped = true; continue; }
+      if (char === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (char === '{' || char === '[') { stack.push(char); depth += 1; }
+      if (char === '}' || char === ']') { stack.pop(); depth -= 1; }
+    }
+    if (depth <= 0) throw new Error('AI 未返回有效的结构化内容');
+    const closing = stack.reverse().map((char) => (char === '{' ? '}' : ']')).join('');
+    return JSON.parse(body + closing) as T;
+  }
 }
 
 /**
@@ -82,6 +103,8 @@ export async function callDeepSeek(
   env: AppEnv,
   messages: Array<{ role: 'system' | 'user'; content: string }>,
   temperature = 0.35,
+  // 跨天行程的 JSON 明显更长，默认上限会把结果截断成半截 JSON
+  maxTokens = 2400,
 ) {
   const baseUrl = (env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '');
   const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -93,13 +116,14 @@ export async function callDeepSeek(
     body: JSON.stringify({
       model: env.DEEPSEEK_MODEL || 'deepseek-chat',
       temperature,
+      max_tokens: maxTokens,
       response_format: { type: 'json_object' },
       messages,
     }),
   });
 
   const rawText = await response.text();
-  let payload: { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } } = {};
+  let payload: { choices?: Array<{ message?: { content?: string }; finish_reason?: string }>; error?: { message?: string } } = {};
   let parseFailed = false;
   try {
     payload = JSON.parse(rawText);
@@ -124,3 +148,23 @@ const pad = (value: number) => String(value).padStart(2, '0');
 
 /** 格式化为 YYYY-MM-DD */
 export const formatDate = (date: Date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+
+/** 列出 [start, end] 之间的所有日期，上限 7 天 */
+export function listDates(start: string, end: string): string[] {
+  const from = new Date(`${start}T00:00:00`);
+  const to = new Date(`${end}T00:00:00`);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return [start];
+  const days: string[] = [];
+  for (let cursor = from; cursor <= to && days.length < 7; cursor.setDate(cursor.getDate() + 1)) {
+    days.push(formatDate(cursor));
+  }
+  return days.length > 0 ? days : [start];
+}
+
+const WEEKDAY_LABEL = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
+/** 取某日的中文星期，用于 AI 提示与前端展示 */
+export function weekdayOf(date: string) {
+  const parsed = new Date(`${date}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? '' : WEEKDAY_LABEL[parsed.getDay()];
+}

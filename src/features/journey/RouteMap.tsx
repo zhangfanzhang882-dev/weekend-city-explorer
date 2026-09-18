@@ -5,6 +5,8 @@ interface RouteMapProps {
   stops: IStop[];
   /** 当前高亮的站点 id */
   activeId?: string;
+  /** 已选住宿：作为独立标记参与投影，不接入折线顺序 */
+  lodging?: { name: string; location?: string } | null;
   className?: string;
 }
 
@@ -39,7 +41,7 @@ const MIN_GAP = 15;
  *    因此在保持原有方位顺序的前提下，对过近的点做最小间距推开。
  *    真实距离始终以连线上的数字为准，图形只负责表达"谁在哪个方向"。
  */
-export default function RouteMap({ stops, activeId, className }: RouteMapProps) {
+export default function RouteMap({ stops, activeId, lodging, className }: RouteMapProps) {
   const layout = useMemo(() => {
     const points = stops
       .map((stop, index) => {
@@ -51,8 +53,14 @@ export default function RouteMap({ stops, activeId, className }: RouteMapProps) 
 
     if (points.length < 2) return null;
 
-    const lngs = points.map((p) => p.lng);
-    const lats = points.map((p) => p.lat);
+    // 住宿只参与坐标范围与绘制，不进入折线顺序（它不是"第几站"）
+    const [lodgeLng, lodgeLat] = (lodging?.location || '').split(',').map(Number);
+    const lodgePoint = lodging && Number.isFinite(lodgeLng) && Number.isFinite(lodgeLat)
+      ? { name: lodging.name, lng: lodgeLng, lat: lodgeLat }
+      : null;
+
+    const lngs = [...points.map((p) => p.lng), ...(lodgePoint ? [lodgePoint.lng] : [])];
+    const lats = [...points.map((p) => p.lat), ...(lodgePoint ? [lodgePoint.lat] : [])];
     const minLng = Math.min(...lngs);
     const maxLng = Math.max(...lngs);
     const minLat = Math.min(...lats);
@@ -144,8 +152,17 @@ export default function RouteMap({ stops, activeId, className }: RouteMapProps) 
     const placed = [...assign(leftGroup, 'left'), ...assign(rightGroup, 'right')]
       .sort((a, b) => a.index - b.index);
 
-    return { placed, width, height };
-  }, [stops]);
+    // 住宿单独投影：用与站点相同的变换，保证相对位置真实
+    const lodgeXY = lodgePoint
+      ? {
+        name: lodgePoint.name,
+        x: offsetX + (lodgePoint.lng - minLng) * cosLat * scale,
+        y: offsetY + (maxLat - lodgePoint.lat) * scale,
+      }
+      : null;
+
+    return { placed, width, height, lodgeXY };
+  }, [stops, lodging]);
 
   if (!layout) {
     return (
@@ -269,6 +286,33 @@ export default function RouteMap({ stops, activeId, className }: RouteMapProps) 
             </g>
           );
         })}
+
+        {/* 住宿：菱形标记 + 虚线引导，与编号站点明确区分 */}
+        {layout.lodgeXY && (
+          <g>
+            <rect
+              x={layout.lodgeXY.x - 2.6}
+              y={layout.lodgeXY.y - 2.6}
+              width={5.2}
+              height={5.2}
+              rx={1}
+              fill="#f5f2ea"
+              stroke="#b45309"
+              strokeWidth={0.9}
+              transform={`rotate(45 ${layout.lodgeXY.x} ${layout.lodgeXY.y})`}
+            />
+            <text
+              x={layout.lodgeXY.x}
+              y={layout.lodgeXY.y + 6.6}
+              textAnchor="middle"
+              fill="#b45309"
+              className="font-bold"
+              style={{ fontSize: '2.9px' }}
+            >
+              住宿
+            </text>
+          </g>
+        )}
       </svg>
     </div>
   );

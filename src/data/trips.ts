@@ -18,6 +18,10 @@ export interface IStop {
   openNote?: string;
   /** 与上一站的直线距离（公里）；首站为 null */
   legKm?: number | null;
+  /** 第几天（0 起）。单日行程恒为 0 */
+  dayIndex?: number;
+  /** 该站所属日期 YYYY-MM-DD */
+  date?: string;
   /** 高德坐标 "lng,lat"，用于地图标注 */
   location?: string;
   source: string[];
@@ -34,6 +38,16 @@ export interface ICheckIn {
   author: string;
 }
 
+/** 每天的概要 */
+export interface IRouteDay {
+  dayIndex: number;
+  date: string;
+  weekday: string;
+  theme: string;
+  stopCount: number;
+  totalKm: number;
+}
+
 export interface IRoute {
   id: string;
   title: string;
@@ -48,6 +62,8 @@ export interface IRoute {
   /** 路线总直线里程与最长单段（公里），用于展示"顺路程度" */
   totalKm?: number;
   maxLegKm?: number;
+  /** 跨天行程的每日概要；单日行程为空 */
+  dayPlan?: IRouteDay[];
   stops: IStop[];
 }
 

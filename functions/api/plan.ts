@@ -1,5 +1,5 @@
 import {
-  amapGet, callDeepSeek, extractJsonObject, formatDate, isDateString, json, safeText,
+  amapGet, callDeepSeek, extractJsonObject, formatDate, isDateString, json, listDates, safeText, weekdayOf,
   type AppEnv,
 } from '../_shared/api';
 import {
@@ -44,7 +44,10 @@ interface RouteDraft {
   subtitle: string;
   accent: string;
   weatherFit: string;
-  stopNames: string[];
+  /** 单日返回：直接给站点名 */
+  stopNames?: string[];
+  /** 多日返回：按天分组 */
+  days?: Array<{ theme?: string; stopNames?: string[]; ids?: number[] }>;
 }
 
 async function getCityAdcode(city: string, key: string) {
@@ -110,13 +113,18 @@ async function getPois(request: PlanRequest, key: string) {
     for (const interest of perAreaKeywords) queries.push(`${prefix}${interest}`);
   }
 
+  // 跨天行程需要的不重复地点成倍增加（3条 × N天 × 每天3站），这里放大候选池
+  const dayCount = listDates(request.date, request.endDate).length;
+  const perQueryOffset = dayCount > 1 ? '12' : '8';
+  const queryLimit = dayCount > 1 ? 14 : 10;
+
   const payloads: Array<Record<string, unknown>> = [];
-  for (const keywords of queries.slice(0, 10)) {
+  for (const keywords of queries.slice(0, queryLimit)) {
     payloads.push(await amapGet('/v3/place/text', {
       keywords,
       city: request.city,
       citylimit: 'true',
-      offset: '8',
+      offset: perQueryOffset,
       page: '1',
       extensions: 'all',
     }, key));
@@ -160,6 +168,10 @@ async function getPois(request: PlanRequest, key: string) {
 
   const enriched = pois.map((poi, index) => {
     const opening = checkOpening(poi.biz_ext?.opentime2, request.date);
+    // 保留原文：多日行程需要对每一天分别校验，不能只用首日结果
+    const rawOpentime = Array.isArray(poi.biz_ext?.opentime2)
+      ? poi.biz_ext.opentime2.join('')
+      : (poi.biz_ext?.opentime2 || '');
     return {
       id: poi.id || `poi-${index + 1}`,
       name: poi.name,
@@ -172,6 +184,7 @@ async function getPois(request: PlanRequest, key: string) {
       cost: Math.max(0, Math.round(Number(poi.biz_ext?.cost || 0) || 0)),
       openStatus: opening.status,
       openNote: opening.note,
+      rawOpentime,
       photos: (poi.photos ?? [])
         .map((photo) => toHttps(photo.url))
         .filter((url) => url.startsWith('https://'))
@@ -222,7 +235,12 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
   })();
 
   // 照片 URL 与原始坐标对选点决策无用且占 token，换成方位与距中心距离
-  const poisForPrompt = pois.map(({ photos, location, ...rest }) => {
+  // 只给 AI 决策必需的字段，并用短 id 代替长地点名，避免输出 JSON 过长被截断
+  const poiIndexById = new Map<number, (typeof pois)[number]>();
+  const poisForPrompt = pois.map((poi, poiIndex) => {
+    poiIndexById.set(poiIndex + 1, poi);
+    const { photos, location, address, tel, source, rawOpentime, id, ...rest } = poi;
+    void photos; void address; void tel; void source; void rawOpentime; void id;
     const point = parseLocation(location);
     const geo = point && center
       ? {
@@ -230,15 +248,57 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
         kmFromCenter: Number(haversineKm(center, point).toFixed(1)),
       }
       : {};
-    return { ...rest, ...geo };
+    return { id: poiIndex + 1, ...rest, ...geo };
   });
 
-  const prompt = `你是周末城市路线规划师。请严格从候选地点中选择，不得创造新地点或修改地点名称。\n\n用户条件：${JSON.stringify(request)}\n天气：${JSON.stringify(weather)}\n候选地点：${JSON.stringify(poisForPrompt)}\n\n生成3条差异明显的一日路线，每条选3个不同地点。\n\n【地理顺路是硬性要求】每个候选地点带 bearing（相对方位）与 kmFromCenter（距中心公里数）。同一条路线内的地点必须彼此靠近、方位一致，相邻两点距离不得超过 ${MAX_LEG_KM} 公里，整条路线跨度不得超过 ${MAX_SPAN_KM} 公里。绝对不要把城市东边和西边的地点放进同一条路线。三条路线之间应通过不同区域或不同主题体现差异。\n\n【消费取向】用户选择的档位是「${request.budgetTier}」，含义是：${request.budgetHint}。请据此挑选地点类型，但不要在任何字段里编造门票价格或人均花费——多数候选地点没有价格数据，价格因城市与场馆差异很大。\n\n候选地点还带 openNote 字段（真实营业时间）。请避免把营业时段明显冲突的地点排进同一条路线。\n\n字段要求：\n- accent：该路线的主题标签，4到6个汉字，例如“室内避雨”“城市漫步”，不要填颜色值或色号。\n- weatherFit：用不超过20个汉字说明这条路线为什么适合当天天气，只描述天气与场地的关系，不要复述日期或预报范围。\n\n只返回JSON：{"routes":[{"title":"","subtitle":"","accent":"","weatherFit":"","stopNames":["候选地点原名"]}]}`;
+  // 按天规划：多日行程要求 AI 为每一天分别安排，且当天不能重复用同一地点
+  const days = listDates(request.date, request.endDate);
+  const dayLabels = days.map((date, index) => `第${index + 1}天 ${date}（${weekdayOf(date)}）`).join('、');
+  const perDayStops = days.length >= 3 ? 2 : 3;
+  // 单日 6km/12km 是按"一天逛完"设的。跨天时每天可接受稍大范围（仍远小于跨城），
+  // 否则 AI 合理的安排会被误杀，全部退化成兜底聚类。
+  const legLimit = days.length > 1 ? 8 : MAX_LEG_KM;
+  const spanLimit = days.length > 1 ? 16 : MAX_SPAN_KM;
+
+  const dayRule = days.length === 1
+    ? `生成3条差异明显的一日路线，每条选 ${perDayStops} 个不同地点。`
+    : `本次行程共 ${days.length} 天：${dayLabels}。
+生成3套完整方案，每套方案都要覆盖全部 ${days.length} 天。
+每天安排 ${perDayStops} 个地点，同一套方案内地点不得重复。
+每天的地点要彼此靠近；不同天之间可以换区域，让每天有不同主题。`;
+
+  const prompt = `你是城市路线规划师。请严格从候选地点中选择，不得创造新地点或修改地点名称。
+
+用户条件：${JSON.stringify(request)}
+天气：${JSON.stringify(weather)}
+候选地点（用 id 引用，不要写地点名）：${JSON.stringify(poisForPrompt)}
+
+${dayRule}
+
+【地理顺路是硬性要求】每个候选地点带 bearing（相对方位）与 kmFromCenter（距中心公里数）。同一天内的地点必须彼此靠近、方位一致，相邻两点距离不得超过 ${legLimit} 公里，当天跨度不得超过 ${spanLimit} 公里。绝对不要把城市东边和西边的地点排进同一天。
+
+【消费取向】用户选择的档位是「${request.budgetTier}」，含义是：${request.budgetHint}。请据此挑选地点类型，但不要在任何字段里编造门票价格或人均花费。
+
+候选地点带 openNote 字段（真实营业时间）。注意不同日期是不同星期，请避免把当天闭馆的场馆排进那一天。
+
+字段要求：
+- title：整套方案的名字，不超过 12 个汉字。
+- accent：主题标签，4到6个汉字，例如"室内避雨""城市漫步"，不要填颜色值或色号。
+- weatherFit：用不超过 20 个汉字说明为什么适合这几天的天气，不要复述日期。
+- days：数组，长度必须等于 ${days.length}，按顺序对应 ${dayLabels}。每项含 theme（当天主题，不超过 8 字）与 ids（当天地点的 id 数字数组，不要写地点名）。
+
+只返回JSON，不要任何解释文字：{"routes":[{"title":"","accent":"","weatherFit":"","days":[{"theme":"","ids":[1,2,3]}]}]}`;
   const content = await callDeepSeek(env, [
     { role: 'system', content: '只根据给定真实数据规划路线。禁止编造地点、价格、开放时间或平台评价。' },
     { role: 'user', content: prompt },
   ]);
-  const drafts = extractJsonObject<{ routes?: RouteDraft[] }>(content).routes ?? [];
+  // AI 输出被截断时 JSON 解析会失败，这里吞掉异常交给地理兜底，而不是整个请求报错
+  let drafts: RouteDraft[] = [];
+  try {
+    drafts = extractJsonObject<{ routes?: RouteDraft[] }>(content).routes ?? [];
+  } catch {
+    drafts = [];
+  }
   const poiMap = new Map(pois.map((poi) => [poi.name, poi]));
   // AI 偶尔会把色号填进 accent、把日期范围复述进 weatherFit，这里做服务端兜底清洗。
   const cleanAccent = (value: unknown) => {
@@ -250,30 +310,68 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
     return /尚未进入预报窗口|预报范围|\d{4}-\d{2}/.test(text) ? '' : text;
   };
   const valid = drafts.slice(0, 3).map((draft, routeIndex) => {
-    const picked = (draft.stopNames || []).map((name) => poiMap.get(name)).filter(Boolean).slice(0, 3) as typeof pois;
-    if (picked.length < 3) return null;
+    // 模型有时会漏掉结尾的 ]，补全后仍是可用数据，只是尾部字段可能为空。
+    // 这类草稿不丢弃，缺标题时按当天主题兜一个，避免白白退化成聚类兜底。
+    // 兼容两种返回：多日的 days[]，与单日的 stopNames[]
+    const rawDays = Array.isArray(draft.days) && draft.days.length > 0
+      ? draft.days
+      : [{ theme: '', stopNames: draft.stopNames || [] }];
 
-    // 地理硬校验：AI 可能无视提示词，这里按最近邻重排并拒绝跨城组合
-    const selected = orderByProximity(picked);
-    const geometry = routeGeometry(selected);
-    if (geometry.measured && (geometry.maxLegKm > MAX_LEG_KM || geometry.spanKm > MAX_SPAN_KM)) return null;
+    const usedInRoute = new Set<string>();
+    const dayPlans: Array<{ date: string; theme: string; picked: typeof pois }> = [];
 
-    const knownCosts = selected.filter((poi) => poi.cost > 0);
-    return {
-      id: `ai-${routeIndex + 1}`,
-      title: safeText(draft.title, 24),
-      subtitle: safeText(draft.subtitle, 44),
-      accent: cleanAccent(draft.accent),
-      weatherFit: cleanWeatherFit(draft.weatherFit),
-      totalTime: `${selected.length * 2} 小时`,
-      budget: selected.reduce((sum, poi) => sum + poi.cost, 0),
-      // 高德多数 POI 无价格数据，需区分“真的免费”与“暂无数据”，避免误导为全程 0 元。
-      budgetKnownCount: knownCosts.length,
-      budgetTotalCount: selected.length,
-      totalKm: Number(geometry.totalKm.toFixed(1)),
-      maxLegKm: Number(geometry.maxLegKm.toFixed(1)),
-      stops: selected.map((poi, stopIndex) => ({
-        id: `${routeIndex + 1}-${poi.id || stopIndex}`,
+    for (let dayIndex = 0; dayIndex < days.length; dayIndex += 1) {
+      const draftDay = rawDays[dayIndex] || rawDays[rawDays.length - 1];
+      const date = days[dayIndex];
+      // 优先用 id（新格式），兼容 stopNames（旧格式/模型偶尔回退）
+      const rawRefs: Array<number | string> = Array.isArray(draftDay?.ids) && draftDay.ids.length > 0
+        ? draftDay.ids
+        : (draftDay?.stopNames || []);
+      const picked = rawRefs
+        .map((ref) => (typeof ref === 'number' ? poiIndexById.get(ref) : poiMap.get(String(ref))))
+        .filter((poi): poi is (typeof pois)[number] => Boolean(poi) && !usedInRoute.has(poi.name))
+        // 按当天日期分别校验营业时间：同一场馆可能周二闭馆、周三开放
+        .filter((poi) => checkOpening(poi.rawOpentime, date).status !== 'closed')
+        .slice(0, perDayStops);
+      // AI 当天给的点可能被去重或闭馆过滤掉，从剩余候选里就近补齐，避免某天只剩两站。
+      // 补进来的点必须让"补齐后的当天整体"仍然顺路，否则宁可少一站也不破坏地理约束。
+      if (picked.length < perDayStops) {
+        const anchor = parseLocation(picked[0]?.location || '');
+        const nearby = pois
+          .filter((poi) => !usedInRoute.has(poi.name) && !picked.some((item) => item.name === poi.name))
+          .filter((poi) => checkOpening(poi.rawOpentime, date).status !== 'closed')
+          .map((poi) => ({ poi, point: parseLocation(poi.location) }))
+          .filter((item) => item.point && (!anchor || haversineKm(anchor, item.point) <= legLimit))
+          .sort((a, b) => (anchor ? haversineKm(anchor, a.point!) - haversineKm(anchor, b.point!) : 0));
+
+        for (const item of nearby) {
+          if (picked.length >= perDayStops) break;
+          const trial = orderByProximity([...picked, item.poi]);
+          const geo = routeGeometry(trial);
+          if (!geo.measured || (geo.maxLegKm <= legLimit && geo.spanKm <= spanLimit)) {
+            picked.push(item.poi);
+          }
+        }
+      }
+      if (picked.length < Math.min(2, perDayStops)) return null;
+      picked.forEach((poi) => usedInRoute.add(poi.name));
+      dayPlans.push({ date, theme: safeText(draftDay?.theme, 16), picked });
+    }
+
+    // 地理硬校验按天进行：同一天内必须顺路，不同天之间允许换区域
+    const orderedDays = dayPlans.map((plan) => {
+      const selected = orderByProximity(plan.picked);
+      return { ...plan, selected, geometry: routeGeometry(selected) };
+    });
+    // 补齐站点后重新校验：补进来的点可能把当天跨度顶超
+    const violated = orderedDays.some(
+      (day) => day.geometry.measured && (day.geometry.maxLegKm > legLimit || day.geometry.spanKm > spanLimit),
+    );
+    if (violated) return null;
+
+    const allStops = orderedDays.flatMap((day, dayIndex) =>
+      day.selected.map((poi, stopIndex) => ({
+        id: `${routeIndex + 1}-${dayIndex + 1}-${poi.id || stopIndex}`,
         name: poi.name,
         type: poi.type,
         area: poi.area,
@@ -287,17 +385,52 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
         openStatus: poi.openStatus,
         openNote: poi.openNote,
         location: poi.location,
-        legKm: stopIndex === 0 ? null : Number((geometry.legs[stopIndex - 1] ?? 0).toFixed(1)),
+        // 当天首站不显示距离；跨天不连线（隔夜之间没有"上一站"）
+        legKm: stopIndex === 0 ? null : Number((day.geometry.legs[stopIndex - 1] ?? 0).toFixed(1)),
+        dayIndex,
+        date: day.date,
         source: poi.source,
         reason: `${poi.address || poi.area}${poi.rating ? ` · 高德评分 ${poi.rating}` : ''}`,
       })),
+    );
+
+    const knownCosts = allStops.filter((stop) => stop.cost > 0);
+    const totalKm = orderedDays.reduce((sum, day) => sum + day.geometry.totalKm, 0);
+    const maxLegKm = Math.max(...orderedDays.map((day) => day.geometry.maxLegKm), 0);
+
+    return {
+      id: `ai-${routeIndex + 1}`,
+      title: safeText(draft.title, 24)
+        || `${orderedDays[0]?.selected[0]?.area || ''}${orderedDays[0]?.theme || '精选路线'}`.slice(0, 24),
+      subtitle: safeText(draft.subtitle, 44),
+      accent: cleanAccent(draft.accent),
+      weatherFit: cleanWeatherFit(draft.weatherFit),
+      totalTime: days.length > 1 ? `${days.length} 天 · 共 ${allStops.length} 站` : `${allStops.length * 2} 小时`,
+      budget: allStops.reduce((sum, stop) => sum + stop.cost, 0),
+      budgetKnownCount: knownCosts.length,
+      budgetTotalCount: allStops.length,
+      totalKm: Number(totalKm.toFixed(1)),
+      maxLegKm: Number(maxLegKm.toFixed(1)),
+      // 每天的概要，供前端分段展示
+      dayPlan: orderedDays.map((day, dayIndex) => ({
+        dayIndex,
+        date: day.date,
+        weekday: weekdayOf(day.date),
+        theme: day.theme,
+        stopCount: day.selected.length,
+        totalKm: Number(day.geometry.totalKm.toFixed(1)),
+      })),
+      stops: allStops,
     };
   }).filter(Boolean);
 
-  // AI 三条路线可能全被地理校验拒绝，用确定性聚类兜底，保证始终有顺路方案
-  if (valid.length < 2) {
-    const fallback = buildGeoRoutes(pois);
-    if (fallback.length >= 2) return fallback;
+  // AI 路线可能部分或全部被地理校验拒绝，用确定性聚类补足到 3 条
+  if (valid.length < 3) {
+    const usedNames = new Set(valid.flatMap((route) => route!.stops.map((stop) => stop.name)));
+    const remaining = pois.filter((poi) => !usedNames.has(poi.name));
+    const fallback = buildGeoRoutes(remaining, days);
+    const merged = [...valid, ...fallback].slice(0, 3);
+    if (merged.length >= 2) return merged;
     throw new Error('未能生成地理上顺路的路线，请缩小区域范围后重试');
   }
   return valid;
@@ -307,47 +440,67 @@ async function generateRoutes(request: PlanRequest, weather: unknown, pois: Awai
  * 确定性兜底：按地理邻近聚类生成路线，不依赖 AI。
  * 取未使用的首个点为种子，配其最近的 2 个邻居成组，天然顺路。
  */
-function buildGeoRoutes(pois: Awaited<ReturnType<typeof getPois>>) {
+function buildGeoRoutes(pois: Awaited<ReturnType<typeof getPois>>, days: string[]) {
+  // 与 AI 路线使用同一套阈值，避免两条通路标准不一致
+  const legLimit = days.length > 1 ? 8 : MAX_LEG_KM;
+  const spanLimit = days.length > 1 ? 16 : MAX_SPAN_KM;
   const withPoint = pois
     .map((poi) => ({ poi, point: parseLocation(poi.location) }))
-    .filter((item) => item.point) as Array<{ poi: typeof pois[number]; point: { lng: number; lat: number } }>;
-  if (withPoint.length < 6) return [];
+    .filter((item) => item.point) as Array<{ poi: (typeof pois)[number]; point: { lng: number; lat: number } }>;
+
+  const perDayStops = days.length >= 3 ? 2 : 3;
+  const needPerRoute = perDayStops * days.length;
+  if (withPoint.length < needPerRoute * 2) return [];
 
   const used = new Set<string>();
-  // 与 AI 路线保持同一结构，便于调用方统一处理
-  const routes: Array<{ id: string; stops: Array<{ name: string; location: string }> } & Record<string, unknown>> = [];
+  const routes: Array<{
+    id: string;
+    stops: Array<{ name: string; location: string; dayIndex: number }>;
+  } & Record<string, unknown>> = [];
 
-  for (let index = 0; index < 3; index += 1) {
+  /** 取一组彼此靠近的点：以首个可用点为种子，配其最近的 n-1 个邻居 */
+  const takeCluster = (size: number, skipSeeds: Set<string>) => {
     const available = withPoint.filter((item) => !used.has(item.poi.name));
-    if (available.length < 3) break;
-    const seed = available[0];
+    const seed = available.find((item) => !skipSeeds.has(item.poi.name));
+    if (!seed || available.length < size) return null;
     const neighbors = available
       .filter((item) => item.poi.name !== seed.poi.name)
       .map((item) => ({ item, km: haversineKm(seed.point, item.point) }))
       .sort((a, b) => a.km - b.km)
-      .slice(0, 2)
+      .slice(0, size - 1)
       .map((entry) => entry.item);
-    if (neighbors.length < 2) break;
-
+    if (neighbors.length < size - 1) return null;
     const group = [seed, ...neighbors];
-    group.forEach((item) => used.add(item.poi.name));
-    const selected = orderByProximity(group.map((item) => item.poi));
-    const geometry = routeGeometry(selected);
-    const knownCosts = selected.filter((poi) => poi.cost > 0);
-    routes.push({
-      id: `geo-${index + 1}`,
-      title: `${selected[0].area}就近路线`,
-      subtitle: selected.map((poi) => poi.name).join(' · ').slice(0, 44),
-      accent: '就近顺路',
-      weatherFit: '',
-      totalTime: `${selected.length * 2} 小时`,
-      budget: selected.reduce((sum, poi) => sum + poi.cost, 0),
-      budgetKnownCount: knownCosts.length,
-      budgetTotalCount: selected.length,
-      totalKm: Number(geometry.totalKm.toFixed(1)),
-      maxLegKm: Number(geometry.maxLegKm.toFixed(1)),
-      stops: selected.map((poi, stopIndex) => ({
-        id: `geo${index + 1}-${poi.id || stopIndex}`,
+    return { seedName: seed.poi.name, selected: orderByProximity(group.map((item) => item.poi)) };
+  };
+
+  for (let index = 0; index < 3; index += 1) {
+    // 每条方案按天各取一个就近簇，天与天之间自然落在不同区域
+    const dayGroups: Array<{ date: string; selected: typeof pois; geometry: ReturnType<typeof routeGeometry> }> = [];
+    for (const date of days) {
+      // 最多试几次：某个簇如果自身就超限（候选稀疏时会出现），换下一个种子
+      let accepted: { selected: typeof pois; geometry: ReturnType<typeof routeGeometry> } | null = null;
+      const rejectedSeeds = new Set<string>();
+      for (let attempt = 0; attempt < 6 && !accepted; attempt += 1) {
+        const candidate = takeCluster(perDayStops, rejectedSeeds);
+        if (!candidate) break;
+        const geometry = routeGeometry(candidate.selected);
+        if (!geometry.measured || (geometry.maxLegKm <= legLimit && geometry.spanKm <= spanLimit)) {
+          // 只有被接受的簇才占用候选，被拒的点仍可被后续方案使用
+          candidate.selected.forEach((poi) => used.add(poi.name));
+          accepted = { selected: candidate.selected, geometry };
+        } else {
+          rejectedSeeds.add(candidate.seedName);
+        }
+      }
+      if (!accepted) break;
+      dayGroups.push({ date, selected: accepted.selected, geometry: accepted.geometry });
+    }
+    if (dayGroups.length !== days.length) break;
+
+    const allStops = dayGroups.flatMap((day, dayIndex) =>
+      day.selected.map((poi, stopIndex) => ({
+        id: `geo${index + 1}-${dayIndex + 1}-${poi.id || stopIndex}`,
         name: poi.name,
         type: poi.type,
         area: poi.area,
@@ -361,10 +514,39 @@ function buildGeoRoutes(pois: Awaited<ReturnType<typeof getPois>>) {
         openStatus: poi.openStatus,
         openNote: poi.openNote,
         location: poi.location,
-        legKm: stopIndex === 0 ? null : Number((geometry.legs[stopIndex - 1] ?? 0).toFixed(1)),
+        legKm: stopIndex === 0 ? null : Number((day.geometry.legs[stopIndex - 1] ?? 0).toFixed(1)),
+        dayIndex,
+        date: day.date,
         source: poi.source,
         reason: `${poi.address || poi.area}${poi.rating ? ` · 高德评分 ${poi.rating}` : ''}`,
       })),
+    );
+
+    const knownCosts = allStops.filter((stop) => stop.cost > 0);
+    const totalKm = dayGroups.reduce((sum, day) => sum + day.geometry.totalKm, 0);
+    const maxLegKm = Math.max(...dayGroups.map((day) => day.geometry.maxLegKm), 0);
+
+    routes.push({
+      id: `geo-${index + 1}`,
+      title: `${dayGroups[0].selected[0].area}就近路线`,
+      subtitle: allStops.map((stop) => stop.name).join(' · ').slice(0, 44),
+      accent: '就近顺路',
+      weatherFit: '',
+      totalTime: days.length > 1 ? `${days.length} 天 · 共 ${allStops.length} 站` : `${allStops.length * 2} 小时`,
+      budget: allStops.reduce((sum, stop) => sum + stop.cost, 0),
+      budgetKnownCount: knownCosts.length,
+      budgetTotalCount: allStops.length,
+      totalKm: Number(totalKm.toFixed(1)),
+      maxLegKm: Number(maxLegKm.toFixed(1)),
+      dayPlan: dayGroups.map((day, dayIndex) => ({
+        dayIndex,
+        date: day.date,
+        weekday: weekdayOf(day.date),
+        theme: `${day.selected[0].area}一带`,
+        stopCount: day.selected.length,
+        totalKm: Number(day.geometry.totalKm.toFixed(1)),
+      })),
+      stops: allStops,
     });
   }
   return routes;
@@ -437,8 +619,11 @@ export async function onRequestPost(context: { request: Request; env: AppEnv }) 
     const cityCenter = centerOf(
       pois.map((poi) => parseLocation(poi.location)).filter(Boolean) as Array<{ lng: number; lat: number }>,
     );
-    // 跨天才需要住宿；以第一条路线的最后一站为中心，保证住得离行程近
-    const lodgingAnchor = isMultiDay ? routes[0]?.stops?.at(-1)?.location : undefined;
+    // 跨天才需要住宿。锚点必须是【第一天】最后一站——那才是当晚要住的地方，
+    // 取整条路线最后一站会锚到第二天的位置，住宿推荐就偏了。
+    const firstDayStops = (routes[0]?.stops ?? []).filter((stop) => (stop.dayIndex ?? 0) === 0);
+    const anchorStop = firstDayStops.at(-1) ?? routes[0]?.stops?.at(-1);
+    const lodgingAnchor = isMultiDay ? anchorStop?.location : undefined;
 
     const [holiday, air, lodging] = await Promise.all([
       fetchHoliday(request.date),
@@ -457,7 +642,7 @@ export async function onRequestPost(context: { request: Request; env: AppEnv }) 
       holiday,
       air,
       lodging,
-      lodgingAnchorName: lodgingAnchor ? routes[0]?.stops?.at(-1)?.name ?? '' : '',
+      lodgingAnchorName: lodgingAnchor ? anchorStop?.name ?? '' : '',
       isMultiDay,
       // 按能力维度列出，而非单一供应商名
       sources: ['真实天气', '真实地点', '节假日日历', '空气质量', 'AI 路线'],

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  ArrowRight, Check, CircleDollarSign, Copy, Flag, ImageOff, Link2, MapPin, MessageSquare,
+  ArrowRight, BedDouble, Check, CircleDollarSign, Copy, Flag, ImageOff, Link2, MapPin, MessageSquare,
   Navigation, Pencil, Plus, RotateCcw, Search, Share2, SkipForward, Star, Trash2, Users,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import RouteMap from '@/features/journey/RouteMap';
-import { searchPlaces } from '@/services/api';
+import { searchLodging, searchPlaces, type ILodging } from '@/services/api';
 import { getSampleReviews } from '@/data/sampleReviews';
 import type { ICheckIn, IRoute, IStop } from '@/data/trips';
 
@@ -143,6 +143,13 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
   // 地点选择器状态：用单一 mode 表示当前用途，避免 swapFor 与 addOpen 两个布尔量
   // 相互覆盖导致替换后弹窗切换成「加入新地点」而不关闭
   const [pickerMode, setPickerMode] = useState<'closed' | 'swap' | 'add'>('closed');
+  // 住宿：跨天才用。选定后进入地图、存储与分享页
+  const [lodging, setLodging] = useState<ILodging | null>(null);
+  const [lodgingOpen, setLodgingOpen] = useState(false);
+  const [lodgingList, setLodgingList] = useState<ILodging[]>([]);
+  const [lodgingQuery, setLodgingQuery] = useState('');
+  const [lodgingLoading, setLodgingLoading] = useState(false);
+  const [lodgingSort, setLodgingSort] = useState<'distance' | 'rating'>('distance');
   const [placeQuery, setPlaceQuery] = useState('');
   const [searchResults, setSearchResults] = useState<IStop[]>([]);
   const [searching, setSearching] = useState(false);
@@ -174,6 +181,34 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
     return () => window.clearTimeout(timer);
   }, [placeQuery, pickerMode, city, usedNames]);
 
+  // 是否跨天：优先看站点自带的 dayIndex，其次看日期区间
+  const dayIndexes = [...new Set(stops.map((stop) => stop.dayIndex ?? 0))].sort((a, b) => a - b);
+  const isMultiDay = dayIndexes.length > 1 || Boolean(endDate && date && endDate > date);
+  // 住宿锚点：第一天最后一站
+  const lodgingAnchor = useMemo(() => {
+    const firstDay = stops.filter((stop) => (stop.dayIndex ?? 0) === dayIndexes[0]);
+    return (firstDay.at(-1) ?? stops.at(-1))?.location || '';
+  }, [stops, dayIndexes]);
+
+  // 住宿搜索：无关键词时按锚点取周边（住得离行程近），有关键词时搜全城
+  useEffect(() => {
+    if (!lodgingOpen) return;
+    const keyword = lodgingQuery.trim();
+    const timer = window.setTimeout(() => {
+      setLodgingLoading(true);
+      void searchLodging(city || '上海', keyword ? { keyword } : { near: lodgingAnchor })
+        .then(setLodgingList)
+        .finally(() => setLodgingLoading(false));
+    }, keyword ? 400 : 0);
+    return () => window.clearTimeout(timer);
+  }, [lodgingOpen, lodgingQuery, city, lodgingAnchor]);
+
+  // 排序：默认按距离（离行程近优先），可切按评分
+  const sortedLodging = useMemo(() => [...lodgingList].sort((a, b) => {
+    if (lodgingSort === 'rating') return (b.rating ?? 0) - (a.rating ?? 0);
+    return (a.distanceM ?? 9e9) - (b.distanceM ?? 9e9);
+  }), [lodgingList, lodgingSort]);
+
   /** 关闭弹窗时清理搜索状态，避免下次打开残留上次结果 */
   const closePicker = () => {
     setPickerMode('closed');
@@ -183,16 +218,20 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
     setSearching(false);
   };
 
-  // 行程被编辑后服务端距离失效，按当前顺序重算
+  // 行程被编辑后服务端距离失效，按当前顺序重算。
+  // 跨天时每天各自从零起算：第二天第一站不应连到第一天最后一站（中间隔了一夜）。
   const stopsWithDistance = useMemo(() => stops.map((stop, index) => {
-    if (index === 0) return { ...stop, legKm: null };
-    const from = parsePoint(stops[index - 1].location);
+    const prev = stops[index - 1];
+    const sameDay = prev && (prev.dayIndex ?? 0) === (stop.dayIndex ?? 0);
+    if (index === 0 || !sameDay) return { ...stop, legKm: null };
+    const from = parsePoint(prev.location);
     const to = parsePoint(stop.location);
     if (!from || !to) return { ...stop, legKm: null };
     return { ...stop, legKm: Number(kmBetween(from, to).toFixed(1)) };
   }), [stops]);
 
   const totalKm = stopsWithDistance.reduce((sum, stop) => sum + (stop.legKm ?? 0), 0);
+
   const editable = stage === 'planning';
   const stageIndex = STAGE_META.findIndex((item) => item.key === stage);
 
@@ -236,6 +275,16 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
             checkIns,
             members,
             costRule,
+            lodging: lodging
+              ? {
+                name: lodging.name,
+                address: lodging.address,
+                location: lodging.location,
+                rating: lodging.rating,
+                tel: lodging.tel,
+                photo: lodging.photos?.[0] || '',
+              }
+              : null,
             // 路线整体评价，仅在结束时填写
             routeReview: routeRating > 0
               ? { rating: routeRating, aspects: aspectScores, comment: routeComment.trim(), recommend }
@@ -332,7 +381,46 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
         </div>
       </div>
 
-      <div className="mb-6"><RouteMap stops={stopsWithDistance} activeId={activeStop?.id} /></div>
+      <div className="mb-6"><RouteMap stops={stopsWithDistance} activeId={activeStop?.id} lodging={lodging} /></div>
+
+      {/* 跨天必须定住宿：选定后进入地图、存储与分享页 */}
+      {isMultiDay && (
+        <div className="mb-6 rounded-3xl border bg-card p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <BedDouble size={16} className="text-primary" />
+            <span className="text-sm font-bold">当晚住宿</span>
+            {!lodging && <span className="text-xs text-muted-foreground">还没选，选定后会显示在地图上</span>}
+            {editable && (
+              <Button size="sm" variant={lodging ? 'outline' : 'default'} className="ml-auto rounded-full" onClick={() => setLodgingOpen(true)}>
+                <Search size={13} className="mr-1" />{lodging ? '换一家' : '挑一家'}
+              </Button>
+            )}
+          </div>
+          {lodging && (
+            <div className="mt-3 flex items-center gap-3 rounded-2xl border p-3">
+              {lodging.photos?.[0]
+                ? <img src={lodging.photos[0]} alt={lodging.name} className="h-14 w-14 shrink-0 rounded-xl bg-muted object-cover" />
+                : <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground"><BedDouble size={18} /></span>}
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-semibold">{lodging.name}</div>
+                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+                  {lodging.rating ? <span className="flex items-center gap-0.5"><Star size={10} className="fill-warning text-warning" />{lodging.rating}</span> : null}
+                  {lodging.distanceM !== null && <span>离首日末站 {lodging.distanceM} m</span>}
+                  <span className="truncate">{lodging.address}</span>
+                </div>
+              </div>
+              {lodging.location && (
+                <a
+                  href={`https://uri.amap.com/marker?position=${lodging.location}&name=${encodeURIComponent(lodging.name)}&src=weekend-city-explorer&coordinate=gaode`}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="shrink-0 rounded-lg border px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
+                >导航</a>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {stage === 'done' ? (
         <PublishedView
@@ -344,6 +432,7 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
           totalKm={totalKm}
           tripId={tripId}
           routeReview={routeRating > 0 ? { rating: routeRating, aspects: aspectScores, comment: routeComment.trim(), recommend } : null}
+          lodging={lodging}
           onRestart={onBack}
         />
       ) : (
@@ -352,8 +441,26 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
             {stopsWithDistance.map((stop, index) => {
               const status = statuses[stop.id] || 'pending';
               const stopCheckIns = checkIns.filter((item) => item.stopId === stop.id);
+              const prevStop = stopsWithDistance[index - 1];
+              const startsNewDay = isMultiDay && (index === 0 || (prevStop.dayIndex ?? 0) !== (stop.dayIndex ?? 0));
+              const dayMeta = route.dayPlan?.find((day) => day.dayIndex === (stop.dayIndex ?? 0));
               return (
                 <div key={stop.id}>
+                  {/* 跨天行程按天分段，让"哪天去哪"一眼看清 */}
+                  {startsNewDay && (
+                    <div className="mb-3 mt-2 flex flex-wrap items-center gap-2 first:mt-0">
+                      <span className="rounded-full bg-foreground px-3 py-1 text-xs font-bold text-background">
+                        第 {(stop.dayIndex ?? 0) + 1} 天
+                      </span>
+                      {(stop.date || dayMeta?.date) && (
+                        <span className="text-sm font-semibold">
+                          {stop.date || dayMeta?.date}{dayMeta?.weekday ? ` ${dayMeta.weekday}` : ''}
+                        </span>
+                      )}
+                      {dayMeta?.theme && <span className="text-xs text-muted-foreground">{dayMeta.theme}</span>}
+                      <span className="h-px flex-1 bg-border" />
+                    </div>
+                  )}
                   {index > 0 && stop.legKm !== null && stop.legKm !== undefined && (
                     <div className="mb-2 ml-6 flex items-center gap-2 text-xs text-muted-foreground">
                       <span className="h-4 w-px bg-border" /><span>距上一站约 {stop.legKm} km</span>
@@ -738,6 +845,77 @@ export default function JourneyPanel({ route, onBack, candidates = [], city, dat
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* 住宿选择：默认按行程附近推荐，可搜索全城、可切排序 */}
+      <Dialog open={lodgingOpen} onOpenChange={setLodgingOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>选择住宿</DialogTitle>
+            <DialogDescription>
+              {lodgingQuery.trim()
+                ? `在${city || '本市'}搜索「${lodgingQuery.trim()}」`
+                : '默认按离第一天最后一站的距离推荐，也可直接搜索酒店名'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="relative">
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={lodgingQuery}
+                onChange={(event) => setLodgingQuery(event.target.value)}
+                placeholder="搜索酒店 / 民宿 / 公寓名称"
+                className="pl-9"
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-muted-foreground">排序</span>
+              {([['distance', '离行程近'], ['rating', '评分高']] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setLodgingSort(key)}
+                  className={`rounded-full border px-2.5 py-1 transition ${lodgingSort === key ? 'border-primary bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-muted'}`}
+                >{label}</button>
+              ))}
+              {lodging && (
+                <button
+                  type="button"
+                  onClick={() => { setLodging(null); setLodgingOpen(false); }}
+                  className="ml-auto rounded-full border px-2.5 py-1 text-muted-foreground hover:bg-muted"
+                >清除已选</button>
+              )}
+            </div>
+            <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+              {lodgingLoading && <div className="py-6 text-center text-sm text-muted-foreground">正在查找…</div>}
+              {!lodgingLoading && sortedLodging.length === 0 && (
+                <div className="py-6 text-center text-sm text-muted-foreground">
+                  {lodgingQuery.trim() ? '没有找到，换个关键词试试' : '附近暂无住宿数据'}
+                </div>
+              )}
+              {!lodgingLoading && sortedLodging.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => { setLodging(item); setLodgingOpen(false); setLodgingQuery(''); }}
+                  className={`flex w-full items-center gap-3 rounded-2xl border p-2.5 text-left transition hover:bg-muted ${lodging?.id === item.id ? 'border-primary bg-primary/5' : ''}`}
+                >
+                  {item.photos?.[0]
+                    ? <img src={item.photos[0]} alt={item.name} className="h-12 w-12 shrink-0 rounded-lg bg-muted object-cover" />
+                    : <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><BedDouble size={16} /></span>}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold">{item.name}</span>
+                    <span className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+                      {item.rating ? <span className="flex items-center gap-0.5"><Star size={10} className="fill-warning text-warning" />{item.rating}</span> : null}
+                      {item.distanceM !== null && <span>{item.distanceM} m</span>}
+                      <span className="truncate">{item.type || item.area}</span>
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }
@@ -759,13 +937,14 @@ function PlaceOption({ stop, onPick }: { stop: IStop; onPick: () => void }) {
 }
 
 /** 已完成：按实际走过的地点生成攻略 */
-function PublishedView({ route, visited, checkIns, members, costRule, totalKm, tripId, routeReview, onRestart }: {
+function PublishedView({ route, visited, checkIns, members, costRule, totalKm, tripId, routeReview, lodging, onRestart }: {
   route: IRoute;
   visited: IStop[];
   checkIns: ICheckIn[];
   members: string[];
   costRule: string;
   totalKm: number;
+  lodging: ILodging | null;
   routeReview: { rating: number; aspects: Record<string, number>; comment: string; recommend: boolean | null } | null;
   tripId: string;
   onRestart: () => void;
@@ -833,6 +1012,19 @@ function PublishedView({ route, visited, checkIns, members, costRule, totalKm, t
           <div className="mt-5 flex items-start gap-2 rounded-2xl bg-secondary p-3.5 text-sm">
             <CircleDollarSign size={16} className="mt-0.5 shrink-0 text-primary" />
             <span><span className="font-semibold">费用约定：</span>{costRule}</span>
+          </div>
+        )}
+
+        {/* 住宿写进攻略：跨天路线的关键信息，别人照着走需要知道住哪 */}
+        {lodging && (
+          <div className="mt-4 flex items-center gap-3 rounded-2xl border bg-secondary/40 p-3">
+            <BedDouble size={16} className="shrink-0 text-primary" />
+            <div className="min-w-0 flex-1 text-sm">
+              <span className="font-semibold">住宿：</span>
+              <span>{lodging.name}</span>
+              {lodging.rating ? <span className="ml-2 text-xs text-muted-foreground">评分 {lodging.rating}</span> : null}
+              {lodging.address && <span className="mt-0.5 block truncate text-xs text-muted-foreground">{lodging.address}</span>}
+            </div>
           </div>
         )}
 

@@ -60,6 +60,16 @@ export interface IAirInfo {
   note: string;
 }
 
+/** 每天的概要，用于按天分段展示 */
+export interface IDayPlan {
+  dayIndex: number;
+  date: string;
+  weekday: string;
+  theme: string;
+  stopCount: number;
+  totalKm: number;
+}
+
 export interface IPlanResponse {
   weather: IWeatherResult;
   routes: IRoute[];

@@ -10,6 +10,15 @@ interface TripPayload {
   members?: unknown[];
   /** 费用约定，用户自由编辑 */
   costRule?: string;
+  /** 已选住宿：跨天行程确定后带位置信息，进入地图与分享页 */
+  lodging?: {
+    name: string;
+    address?: string;
+    location?: string;
+    rating?: number | null;
+    tel?: string;
+    photo?: string;
+  } | null;
   /** 路线整体评价：总分、分项、感受、是否推荐 */
   routeReview?: {
     rating?: number;
@@ -91,6 +100,17 @@ export async function onRequestPost(context: { request: Request; env: AppEnv }) 
       checkIns: Array.isArray(trip.checkIns) ? trip.checkIns.slice(0, 100) : [],
       members: Array.isArray(trip.members) ? trip.members.slice(0, 20) : [],
       costRule: String(trip.costRule ?? '').slice(0, 120),
+      // 住宿只存展示与定位必需的字段，避免整条 POI 塞进 KV
+      lodging: trip.lodging && String(trip.lodging.name || '').trim()
+        ? {
+          name: String(trip.lodging.name).slice(0, 40),
+          address: String(trip.lodging.address ?? '').slice(0, 80),
+          location: String(trip.lodging.location ?? '').slice(0, 40),
+          rating: Number(trip.lodging.rating) > 0 ? Number(trip.lodging.rating) : null,
+          tel: String(trip.lodging.tel ?? '').slice(0, 40),
+          photo: String(trip.lodging.photo ?? '').slice(0, 300),
+        }
+        : null,
       routeReview: trip.routeReview && Number(trip.routeReview.rating) > 0
         ? {
           rating: Math.min(Math.max(Math.round(Number(trip.routeReview.rating) || 0), 1), 5),
